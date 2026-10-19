@@ -1,4 +1,5 @@
 {
+  // Pre-migration reference only. cf uses cloudflare.config.ts and wrangler.config.ts.
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "whatsapp-mcp",
   "main": "src/index.ts",

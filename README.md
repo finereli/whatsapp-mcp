@@ -20,24 +20,27 @@ Your messages live in a SQLite database inside a Durable Object in your Cloudfla
 
 ## Set it up
 
-You need a Cloudflare account on the Workers Paid plan (see the note below), Node 20 or later, and your phone.
+You need a Cloudflare account on the Workers Paid plan (see the note below), Node 22.18 or later, and your phone.
 
 ```sh
 git clone https://github.com/finereli/whatsapp-mcp
 cd whatsapp-mcp
 npm install
 
-# 1. A place for the sign-in tokens. Paste the id it prints into wrangler.jsonc.
-npx wrangler kv namespace create OAUTH_KV
+# cf uses its own login; a Wrangler login is not reused.
+npx cf auth login
 
-# 2. A password for the page that links your phone. 12+ characters.
-npx wrangler secret put OWNER_PASSWORD
+# 1. A place for the sign-in tokens. Paste the returned id into cloudflare.config.ts.
+npx cf kv namespaces create --title OAUTH_KV
 
-# 3. Deploy.
-npm run deploy
+# 2. Create .secrets.json with {"OWNER_PASSWORD":"your password"}.
+# Use a password of at least 12 characters. This file is gitignored.
+
+# 3. Deploy and upload the password with this version.
+npm run deploy -- --secrets-file .secrets.json
 ```
 
-Wrangler prints your URL, something like `https://whatsapp-mcp.your-name.workers.dev`. Open it. The front page has the two remaining steps:
+`cf` prints your URL, something like `https://whatsapp-mcp.your-name.workers.dev`. Open it. The front page has the two remaining steps:
 
 1. **Link WhatsApp.** Scan the QR code with WhatsApp (Settings, Linked Devices, Link a Device). If you're on the phone itself and can't scan a screen, use the phone number option instead. The first link imports your history. The page shows progress, and you can close it.
 2. **Connect your agent.** In Claude Code:
@@ -48,11 +51,11 @@ Wrangler prints your URL, something like `https://whatsapp-mcp.your-name.workers
 
    Then type `/mcp` and sign in with the password. Other clients: point them at the same `/mcp` URL.
 
-If you want your own domain, see the comments at the bottom of `wrangler.jsonc`.
+For your own domain, set `worker.domains` in `cloudflare.config.ts`, or use the private deployment settings below.
 
 ### The Workers Paid note
 
-Importing a large history decodes a lot of data in one go, and the default CPU limit on Workers is too small for it. `wrangler.jsonc` raises it, and raising it needs the paid plan, which is a few dollars a month. I haven't tried the free plan. If you're on it, remove the `limits` block and expect the first import to be fragile.
+Importing a large history decodes a lot of data in one go, and the default CPU limit on Workers is too small for it. `cloudflare.config.ts` raises it, and raising it needs the paid plan, which is a few dollars a month. I haven't tried the free plan. If you're on it, remove the `limits` block and expect the first import to be fragile.
 
 ## Things to know
 
@@ -190,7 +193,15 @@ These all cost real time to find. Read them before touching the Baileys parts.
 | `OAUTH_KV` | binding | Token store for the OAuth provider and pending sign-ins. |
 | `WA` | binding | The Durable Object. |
 
-Keep a deployment's own values (domain, KV id, email) in `wrangler.local.jsonc`, which is gitignored, and deploy with `npm run deploy:local`. `wrangler.jsonc` is the template other people start from.
+`cloudflare.config.ts` defines the Worker, bindings, SQLite Durable Object lifecycle, and scheduled sync. `wrangler.config.ts` holds only build settings: `cf` uses Wrangler as its bundler to preserve the Baileys aliases and compiled Wasm module. Run `npm run dev`, `npm run build`, and `npm run deploy` through `cf`.
+
+For private deployment settings, copy `cloudflare.local.example.json` to the gitignored `cloudflare.local.json`. Set `oauthKvId` to the existing KV namespace ID. Optional fields are `accountId`, `name` (defaults to `whatsapp-mcp`), `domain`, and `vars` (a map of strings, for example `OWNER_EMAIL`, `LOGIN_ORIGIN`, and `ALLOWED_ORIGINS`). Then use `npm run deploy:local -- --secrets-file .secrets.json`. Here `--mode private` selects private deployment settings; it still deploys to Cloudflare. To develop with those same settings, use `npm run dev -- --mode private`.
+
+Keep secret values out of both config files. Upload `OWNER_PASSWORD`, and optionally `PIN`, in `.secrets.json` via `--secrets-file`. Local development still uses `.dev.vars`.
+
+When migrating an existing deployment, preserve the Worker name, KV namespace ID, and `WhatsAppStore` class name. Its new `exports.durableObject({ storage: 'sqlite' })` declaration replaces the old `v1` migration. Transfer any values from `wrangler.local.jsonc` to `cloudflare.local.json`; `cf` does not read the old JSONC files. `wrangler.jsonc` is retained only as the pre-migration reference.
+
+`cf` is currently in beta and is pinned to the version validated here. See [Cloudflare's migration guide](https://developers.cloudflare.com/cf/wrangler/migrate/) when updating it.
 
 ## Adapting it
 
@@ -217,7 +228,7 @@ To test the pairing UI states without a phone, serve the page with a mocked `/pa
 
 ## Checking a change
 
-1. `npm run typecheck`, then `npm test`. The test runs the real store code against Node's built-in SQLite (Node 22.13 or later), including the migration from older versions. That SQLite has no FTS5, so search itself isn't covered.
+1. `npm run typecheck`, then `npm test`, `npm run build`, and `npm run deploy -- --dry-run`. The test runs the real store code against Node's built-in SQLite (Node 22.13 or later), including the migration from older versions. That SQLite has no FTS5, so search itself isn't covered.
 2. Deploy, then `GET /debug` with the PIN. It should come back with `phase: "idle"` and `paired: true`.
 3. `GET /debug/pull`. A quiet account should return `reason: "idle"` in about ten seconds.
 4. Call `list_chats`, then `get_messages` on a Hebrew or emoji-heavy chat, then `search_messages`. Then `unnamed_chats`, and `set_contact_names` on one number, and confirm the chat shows the name.

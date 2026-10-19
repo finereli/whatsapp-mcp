@@ -5,11 +5,12 @@
   "type": "module",
   "scripts": {
     "postinstall": "node scripts/vendor-bridge.mjs",
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "deploy:local": "wrangler deploy -c wrangler.local.jsonc",
+    "dev": "cf dev",
+    "deploy": "cf deploy",
+    "deploy:local": "cf deploy --mode private",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-transform-types --no-warnings test/store.test.mts"
+    "test": "node --experimental-transform-types --no-warnings test/store.test.mts",
+    "build": "cf build"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "0.7.0",
@@ -20,6 +21,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261018.1",
+    "cf": "1.0.0-beta.18",
     "typescript": "^7.0.2",
     "wrangler": "^4.151.1"
   },
@@ -28,5 +30,8 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/finereli/whatsapp-mcp.git"
+  },
+  "engines": {
+    "node": ">=22.18.0"
   }
 }

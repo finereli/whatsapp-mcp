@@ -1,0 +1,5 @@
+{
+  "name": "whatsapp-mcp",
+  "oauthKvId": "REPLACE_WITH_KV_NAMESPACE_ID",
+  "vars": {}
+}
