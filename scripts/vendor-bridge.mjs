@@ -1,7 +1,7 @@
 // workerd refuses to compile wasm from bytes at runtime, and whatsapp-rust-bridge
 // ships its wasm as base64 compiled via `new WebAssembly.Module(bytes)`. Extract
-// the SIMD build into a real .wasm file so wrangler can bundle it as a
-// CompiledWasm module, and patch the loader to use it. wrangler.jsonc aliases
+// the SIMD build into a real .wasm file so the bundler can include it as a
+// CompiledWasm module, and patch the loader to use it. wrangler.config.ts aliases
 // the package to vendor/whatsapp-rust-bridge.
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 
