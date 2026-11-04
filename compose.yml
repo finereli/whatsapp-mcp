@@ -1,0 +1,12 @@
+# Put a reverse proxy or tunnel with TLS in front, routing PUBLIC_HOST to this port.
+services:
+  whatsapp-mcp:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:?set PUBLIC_HOST in .env}
+    ports:
+      - "${BIND:-127.0.0.1}:${PORT:-8787}:8787"
+    volumes:
+      - ./data:/data
