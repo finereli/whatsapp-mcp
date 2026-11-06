@@ -9,7 +9,7 @@
     "deploy": "wrangler deploy",
     "deploy:local": "wrangler deploy -c wrangler.local.jsonc",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-transform-types --no-warnings test/store.test.mts"
+    "test": "node --experimental-transform-types --no-warnings --import ./test/ts-resolve.mjs test/store.test.mts"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "0.7.0",

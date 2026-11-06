@@ -39,6 +39,7 @@ Your messages live in a SQLite database inside a Durable Object in Cloudflare, o
 - Each account has a random data key. It encrypts everything you own: message text, chat and contact names, the names your agent saves, and WhatsApp's session keys.
 - The data key is stored only in a form locked by that password or login key (PBKDF2-SHA256, 600,000 rounds for a password, then AES-256-GCM). Someone who copies the database can't read your stored messages without it.
 - Phone numbers and chat ids are replaced by keyed hashes in the database, so it can still sort and group without knowing who anyone is. Timestamps, message types and which side sent each message are left readable, and so is roughly how long each message is. Someone with the database could see how many chats you have, how active they are and when, but not who they were with or what they said.
+- Search uses a filter per block of about 128 messages, built from keyed hashes of the words in it (see "Searching encrypted messages" below). Without your key it can't be tested for any word. What it shows is roughly how many different words a block holds.
 - Signing in produces the data key for a while. It travels inside the OAuth token your agent holds and your browser session, each encrypted under that token. The server stores nothing that can open your data on its own.
 
 **It is not end-to-end encryption, and you should know exactly where that stops.**
@@ -101,7 +102,7 @@ The first version stored messages in plain text. The first sign-in after you dep
 
 **Syncing happens when your agent asks.** There is no scheduled pull, because the data key only exists while someone is signed in, and a background job would have nothing to decrypt with. Every read tool first tops up from WhatsApp if the stored copy is more than ten minutes old, so you notice nothing day to day. WhatsApp queues messages for a linked device for a limited time. An account nobody uses for weeks may have lost the messages WhatsApp was holding for it, and would need a full resync: link the phone again and import what WhatsApp sends. That's the price of never keeping a key on the server.
 
-**Search takes a few seconds on a big history.** The messages are encrypted, so there is no search index to look things up in. A search decrypts and scans, newest first, and stops as soon as it has enough matches. A full scan of 200,000 messages takes about two seconds. Decrypting is the cost, and it is paid once however many queries ride along, so `search_messages` takes a list: agents should put every search they need in one call.
+**Search reads a block per match, not the whole history.** The messages are encrypted, so the database can't search them, but each block of about 128 messages carries a small keyed filter that says which words it can't contain. A search skips every block its words rule out, and decrypts only the rest. The first search on an account from before this builds the filters, which costs about what one search used to: a full decrypt, once. Several queries still share one pass, so `search_messages` takes a list: agents should put every search they need in one call.
 
 **Search is exact words.** Words match whole (case and accents ignored), several words must all appear, "quoted words" must appear together in order, and a trailing `*` matches word starts (`flight*`). It isn't fuzzy, and it doesn't stem.
 
@@ -222,7 +223,8 @@ Don't log a key, put one in a URL, or store one anywhere that outlives a session
 | `src/brand.ts` | The logo as the Worker serves it: the SVG, the PNG icons and the social card, embedded so a deployment needs no static hosting. |
 | `src/phone.ts` | Phone numbers in any format to WhatsApp jids. |
 | `src/whatsapp-do.ts` | The Durable Object. Holds the account record, unlocks with a key, runs Baileys sessions, exposes RPC methods for the Worker. |
-| `src/store.ts` | Schema, ingesting Baileys events into SQLite, every query, the search scan, and the migration from the plaintext version. |
+| `src/store.ts` | Schema, ingesting Baileys events into SQLite, every query, search, and the migration from the plaintext version. |
+| `src/search-index.ts` | The keyed Bloom filters that let search skip blocks it can't match. |
 | `src/auth-state.ts` | Baileys auth state backed by the DO's SQLite and sealed (replaces `useMultiFileAuthState`). |
 | `src/mcp.ts` | The MCP tools, and the hint that points agents at the naming tools. |
 | `src/pages.ts`, `src/landing.ts`, `src/privacy.ts`, `src/tos.ts`, `src/ui.ts` | All HTML. `ui.ts` has the shared design tokens. |
@@ -251,9 +253,34 @@ All in the Durable Object's SQLite (`store.ts`). "Sealed" means a `Vault.seal` b
 - `chats(cid, data)`, `contacts(cid, data)`, `custom_names(cid, data)`. `cid` is the pid of the jid, and the sealed record holds the jid and the names. Display names resolve in memory (`nameOf` in `store.ts`), from a decrypted snapshot of these small tables that is dropped whenever they change: WhatsApp's chat name, then WhatsApp's contact name, then a saved name, then WhatsApp's notify name, then the latest push name seen in the chat, then the number. `custom_names` is what `set_contact_names` writes.
 - `alias(cid, data)`. WhatsApp is moving to anonymous `@lid` identifiers. This maps them to phone-number JIDs, and `addAlias` folds existing rows into the phone-number form so one person is one chat.
 - `auth(k, data)`. Baileys credentials and signal keys, with the key name hashed too, since `session-<number>.0` names a contact.
-- `meta(k, v)`, in the clear: `last_pull`, `paired`, `tz`, login throttling, a sealed canary, `schema`. `account(k, v)` holds the account record.
+- `meta(k, v)`, in the clear: `last_pull`, `paired`, `tz`, login throttling, a sealed canary, `schema`, `search_index`. `account(k, v)` holds the account record.
+- `chat_stats(chat, n, last)`: each chat's message count and newest timestamp, kept by triggers on `messages`, so counting never scans. Any new write to `messages` gets this for free; don't use `INSERT OR REPLACE` on it, because a replace removes the old row without running delete triggers.
+- `lid_senders(sender)`: senders stored under an unmapped `@lid`. `addAlias` only rewrites messages for lids in here.
+- `search_blocks(blk, chat, start, last, n, bloom)`: the search filters. See below.
 
-There is no search index. `search()` streams messages newest first, decrypts each, and tests it against every pending query. Messages are matched as whole words after folding case and accents. Keep new work in `store.ts` in the same shape: a query that needs a name or a number is answered in JavaScript from the snapshot, not in SQL.
+Keep new work in `store.ts` in the same shape: a query that needs a name or a number is answered in JavaScript from the snapshot, not in SQL.
+
+## Searching encrypted messages
+
+The database can't look inside message text, because it's sealed. The first version answered every search by decrypting the whole history, newest first. That works, and it costs a full read of every message per search.
+
+Now each chat's timeline is cut into blocks of about 128 messages (`search-index.ts`). Each block has a Bloom filter: 16,384 bits, with 4 bits set for every word that appears in the block, and for each word's first one to four letters, so `lunch*` works. Which 4 bits is decided by an HMAC of the word under a key derived from the user's data key. So:
+
+- A search hashes its words the same way and checks each block's bits. One bit off means the word is certainly not in that block, and the block is never read. All bits on means it probably is, so the block's messages are decrypted and matched properly. The filter only decides what to read; the match itself is the same whole-word match as always, so results are exactly what a full scan would give. The tests check that against a brute-force scan.
+- Blocks are read newest first and the search stops once every query has its `limit` matches newer than anything left. A rare word costs about one block per match. A word that appears nowhere costs one row per block and nothing else.
+- Without the key, a filter is a bit array with some fraction of bits set. That reveals roughly how many distinct words a block has, which says little beyond the message lengths that are already visible. It doesn't reveal which words, how often each appears, or whether two blocks share a word. Someone with the key can already decrypt the messages.
+- Bits are only ever added. An edit adds the new words and a delete leaves the old ones, so a filter can grow stale but never wrong: stale bits cost an extra block read, never a missed match.
+- A block covers its chat from its `start` up to the next block's `start`. Live messages land in the newest block until it holds 128, then a new one starts. History that arrives out of order goes into whichever block covers its time, and a block that grows past 256 is recut from its messages. When a lid chat is merged into a phone number, the number's blocks are rebuilt.
+- Filter updates are collected for the whole ingest batch and written once per block touched, not once per message.
+
+## What costs money
+
+On Durable Objects, SQLite is billed by rows read and rows written, and a row written costs about a thousand times a row read. Index rows count as rows. So:
+
+- Don't add an index to `messages` casually. It is one more row written for every message, forever. `lid_senders` exists because an index on `sender` would have cost more than the scan it saved.
+- Don't count or group over `messages` on a hot path. Status polls, `list_chats` and the size check used to, and at a hundred users that was most of the bill. Use `chat_stats`.
+- Batch writes to the small tables. One write per chat or block per ingest batch is fine; one per message adds up.
+- Reads are cheap until they're full scans of big histories on every request. Then they're the bill.
 
 Ingest is idempotent. Re-importing history inserts what's missing and fills in a missing sender or push name, and never duplicates. That is what makes relinking safe.
 
@@ -317,7 +344,7 @@ To test the pairing UI states without a phone, serve the page with a mocked `/pa
 
 ## Checking a change
 
-1. `npm run typecheck`, then `npm test`. The test runs the real store, vault and auth state against Node's built-in SQLite (Node 22.13 or later): the cryptography, names, search, the migration from the plaintext version, and a check that no message, name or number can be found in a dump of the database. It also checks that the check itself can fail, by running it on an unmigrated database.
+1. `npm run typecheck`, then `npm test`. The test runs the real store, vault and auth state against Node's built-in SQLite (Node 22.13 or later): the cryptography, names, search (checked against a brute-force scan of a few thousand messages arriving out of order), the running counts, the migration from the plaintext version, and a check that no message, name or number can be found in a dump of the database. It also checks that the check itself can fail, by running it on an unmigrated database.
 2. Anything that touches SQL types needs a run inside the real runtime too, because Node's SQLite isn't the Durable Object's (BLOB binding, cursors, DDL inside a transaction). A throwaway Durable Object that imports `store.ts` and runs under `wrangler dev` is enough.
 3. Deploy, sign in, link a phone, and call `link_status`, then `list_chats`, then `get_messages` on a Hebrew or emoji-heavy chat, then `search_messages` with two or three queries at once. Then `unnamed_chats`, and `set_contact_names` on one number, and confirm the chat shows the name.
 4. If you touched ingest, relink and confirm the stored message count doesn't grow (re-import is idempotent) and that group messages show real sender names.
@@ -331,7 +358,7 @@ To test the pairing UI states without a phone, serve the page with a mocked `/pa
 - Signup is capped by `SIGNUP_LIMIT` and nothing else. Google proves the email, so there is no verification of our own.
 - The login service holds a master secret. Lose it and every hosted account is unreadable; leak it together with the database and every account is readable.
 - Wrong-password lockouts apply to the password mode only, per account, so someone who knows the owner's setup could lock the owner out of signing in for up to an hour. Agents that are already connected keep working.
-- Search scans everything. That's fine for a person's WhatsApp and wouldn't be for a company's archive.
+- Search is fast for rare words and slower for common ones, which match in most blocks anyway. A one-letter prefix search (`a*`) reads nearly everything.
 - Edits and deletes are applied when they arrive as protocol messages. That path hasn't been tested against real ones.
 - It's only been exercised against one real account.
 

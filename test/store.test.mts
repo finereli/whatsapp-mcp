@@ -1,6 +1,6 @@
 // Runs the real Store against node:sqlite (a stand-in for the Durable Object's SqlStorage).
 import { DatabaseSync } from 'node:sqlite';
-import { initSchema, isLegacy, migrateLegacy, parseQuery, Store } from '../src/store.ts';
+import { initSchema, isLegacy, matches, migrateLegacy, parseQuery, Store } from '../src/store.ts';
 import { sqliteAuthState } from '../src/auth-state.ts';
 import { limitsOf, verdict } from '../src/limits.ts';
 import { createAccount, KEY_STRETCH, newToken, openAccount, rewrap, tokenId, unwrapForToken, Vault, wrapForToken } from '../src/vault.ts';
@@ -357,6 +357,71 @@ for (const [i, cc, want] of cases) check(`toJid(${JSON.stringify(i)}, ${cc})`, t
   same('an older store is filled on upgrade');
   ts_.reset();
   check('and counts work after it', ts_.counts().messages === 10, ts_.counts());
+}
+
+// ---------- search index ----------
+{
+  const { db: sdb, sql: ssql } = makeSql();
+  initSchema(ssql);
+  const st = new Store(ssql, (fn) => fn(), vault);
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+  const pick = <T,>(a: T[]) => a[Math.floor(rnd() * a.length)];
+  const vocab = Array.from({ length: 400 }, (_, i) => `w${i.toString(36)}x`).concat(['lunch', 'lunchbox', 'dinner', 'שלום', 'café', 'meeting']);
+  const chats = ['972500000101@s.whatsapp.net', '972500000102@s.whatsapp.net', '972500000103@s.whatsapp.net', '7777@g.us'];
+  const all: any[] = [];
+  for (let i = 0; i < 3000; i++) {
+    const body = Array.from({ length: 1 + Math.floor(rnd() * 8) }, () => pick(vocab)).join(' ') + (i % 997 === 0 ? ' zebra-unicorn' : '');
+    all.push(M(`s${i}`, pick(chats), 1_000 + Math.floor(rnd() * 100_000), body, false, { key: { participant: '972500000199@s.whatsapp.net' } }));
+  }
+  for (let i = all.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [all[i], all[j]] = [all[j], all[i]]; }
+
+  // brute force: decrypt everything, newest first, the way search used to work
+  const brute = (q: string, o: { chat?: string; since?: number; until?: number; limit: number }) => {
+    const terms = parseQuery(q);
+    const rows = sdb.prepare(`SELECT id, chat, ts, data FROM messages ORDER BY ts DESC, id`).all() as any[];
+    return rows.filter((r) => (!o.chat || r.chat === vault.pid('jid', o.chat)) && (!o.since || r.ts >= o.since) && (!o.until || r.ts <= o.until)
+      && matches(vault.open(r.data.buffer.slice(r.data.byteOffset, r.data.byteOffset + r.data.byteLength), 'm').b, terms)).map((r) => r.ts);
+  };
+  const queries = ['lunch', 'lunch*', 'lunc*', 'l*', '"w1x w2x"', 'w1x w2x', 'zebra unicorn', 'zebra-unicorn', 'שלום', 'cafe', 'nothinglikethis', 'meeting dinner'];
+  const agree = (label: string) => {
+    let bad = 0;
+    for (const q of queries) for (const o of [{ limit: 25 }, { limit: 500 }, { chat: chats[1], limit: 10 }, { since: 30_000, until: 60_000, limit: 15 }]) {
+      const got = st.search({ queries: [q], ...o }).hits[0].map((h) => h.ts);
+      const want = brute(q, o).slice(0, o.limit);
+      if (JSON.stringify(got) !== JSON.stringify(want)) { bad++; if (bad < 3) console.log('  mismatch', label, q, o, got.slice(0, 5), want.slice(0, 5)); }
+    }
+    check(`indexed search equals a full scan: ${label}`, bad === 0, bad);
+  };
+
+  st.ingestMessages(all.slice(0, 1200));
+  agree('built on first search');
+  for (let i = 1200; i < all.length; i += 150) st.ingestMessages(all.slice(i, i + 150)); // out of order, after the index exists
+  agree('kept up by later batches, out of order');
+  const blocks = sdb.prepare(`SELECT COUNT(*) n, MAX(n) big FROM search_blocks`).get() as any;
+  check('blocks stay bounded as history fills in', blocks.big <= 2 * 128 + 150, blocks);
+
+  const total = (sdb.prepare(`SELECT COUNT(*) n FROM messages`).get() as any).n;
+  const rare = st.search({ queries: ['zebra'], limit: 30 });
+  // the cost of a search is about one block per match, plus the odd false positive, not the whole history
+  check('a rare word reads about one block per match', rare.scanned <= (rare.hits[0].length + 1) * 2 * 128, { scanned: rare.scanned, hits: rare.hits[0].length, total });
+  const none = st.search({ queries: ['nothinglikethis'], limit: 30 });
+  check('a word that is nowhere reads almost nothing', none.scanned <= 2 * 128, { scanned: none.scanned, total });
+  check('and finds every match', rare.hits[0].length === brute('zebra', { limit: 30 }).length);
+  check('several queries at once agree too', JSON.stringify(st.search({ queries: ['lunch', 'dinner'], limit: 20 }).hits.map((h) => h.map((x) => x.ts)))
+    === JSON.stringify([brute('lunch', { limit: 20 }).slice(0, 20), brute('dinner', { limit: 20 }).slice(0, 20)]));
+
+  // an edit adds its new words
+  st.ingestMessages([{ key: { id: 'es1', remoteJid: chats[0], fromMe: false }, messageTimestamp: 200_000, message: { protocolMessage: { key: { id: (all.find((m) => m.key.remoteJid === chats[0]) as any).key.id }, editedMessage: { conversation: 'now about giraffes' } } } } as any]);
+  check('an edited message is found by its new words', st.search({ queries: ['giraffes'], limit: 5 }).hits[0].length === 1);
+
+  // a lid chat merged into a number keeps its messages searchable
+  const SL = '4455667788@lid', SPN = '972500000177@s.whatsapp.net';
+  st.ingestMessages([M('sl1', SL, 300_000, 'kangaroo from a lid')]);
+  st.ingestMessages([M('sp1', SPN, 300_001, 'kangaroo from the number')]);
+  st.addAlias(SL, SPN);
+  check('merged chats stay searchable', st.search({ queries: ['kangaroo'], limit: 5 }).hits[0].length === 2);
+  agree('after edits and a merge');
 }
 
 console.log(failed ? `\n${failed} FAILED` : '\nall passed');

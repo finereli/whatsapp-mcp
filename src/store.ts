@@ -10,6 +10,7 @@
 import { getContentType, normalizeMessageContent, jidNormalizedUser } from '@whiskeysockets/baileys';
 import type { proto } from '@whiskeysockets/baileys';
 import type { Vault } from './vault.js';
+import { SearchIndex, fold, needsOf, words } from './search-index.js';
 
 // What each kind of blob is bound to, so one can't be swapped for another.
 const MSG = 'm', CHAT = 'c', CONTACT = 'k', NAME = 'n', ALIAS = 'l';
@@ -54,6 +55,8 @@ function createDerived(sql: SqlStorage) {
   sql.exec(`
     CREATE TABLE IF NOT EXISTS chat_stats (chat TEXT PRIMARY KEY, n INTEGER NOT NULL, last INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS lid_senders (sender TEXT PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS search_blocks (blk INTEGER PRIMARY KEY, chat TEXT NOT NULL, start INTEGER NOT NULL, last INTEGER NOT NULL, n INTEGER NOT NULL, bloom BLOB NOT NULL);
+    CREATE INDEX IF NOT EXISTS search_blocks_chat ON search_blocks (chat, start);
     CREATE TRIGGER IF NOT EXISTS chat_stats_ai AFTER INSERT ON messages BEGIN
       INSERT INTO chat_stats (chat, n, last) VALUES (new.chat, 1, new.ts)
         ON CONFLICT (chat) DO UPDATE SET n = n + 1, last = MAX(last, excluded.last);
@@ -242,8 +245,6 @@ export function describe(msg: proto.IWebMessageInfo): { type: string; body: stri
 
 // ---------- search ----------
 
-const fold = (s: string) => s.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase();
-const words = (s: string) => fold(s).match(/[\p{L}\p{N}]+/gu) ?? [];
 
 /** One search term: a word, or a quoted phrase. A trailing * on a word matches any word that starts with it. */
 interface Term { tokens: string[]; prefix: boolean }
@@ -273,7 +274,7 @@ function hasTerm(have: string[], t: Term): boolean {
 }
 
 /** Does this text satisfy every term? The cheap substring check runs first so most messages never get tokenized. */
-function matches(text: string, terms: Term[]): boolean {
+export function matches(text: string, terms: Term[]): boolean {
   const flat = fold(text);
   if (!terms.every((t) => t.tokens.every((tok) => flat.includes(tok)))) return false;
   const have = flat.match(/[\p{L}\p{N}]+/gu) ?? [];
@@ -291,12 +292,16 @@ export class Store {
   private stats: Map<string, { n: number; last: number }> | null = null;
   private aliasMap: Map<string, string> | null = null;
 
-  constructor(private sql: SqlStorage, private tx: <T>(fn: () => T) => T, private vault: Vault) {}
+  private index: SearchIndex;
+
+  constructor(private sql: SqlStorage, private tx: <T>(fn: () => T) => T, private vault: Vault) {
+    this.index = new SearchIndex(sql, vault, (data) => vault.open<MsgBlob>(data, MSG).b);
+  }
 
   private pj = (jid: string) => this.vault.pid('jid', jid);
   private dirty() { this.snap = null; this.stats = null; }
   /** Forget what was cached, after something outside the store changed the tables. */
-  reset() { this.dirty(); this.aliasMap = null; }
+  reset() { this.dirty(); this.aliasMap = null; this.index.reset(); }
 
   // ----- reading the small tables -----
 
@@ -375,8 +380,9 @@ export class Store {
       blob.s = pn;
       this.sql.exec(`UPDATE messages SET sender = ?, data = ? WHERE chat = ? AND id = ?`, P, this.vault.seal(blob, MSG), r.chat, r.id);
     }
-    this.sql.exec(`UPDATE OR IGNORE messages SET chat = ? WHERE chat = ?`, P, L);
+    const moved = written(this.sql.exec(`UPDATE OR IGNORE messages SET chat = ? WHERE chat = ?`, P, L)) > 0;
     this.sql.exec(`DELETE FROM messages WHERE chat = ?`, L);
+    if (moved) { this.index.dropChat(L); this.index.rebuildChat(P); }
     const old = this.getChat(lid);
     if (old) {
       if (!this.getChat(pn)) this.putChat({ ...old, jid: pn, group: 0 });
@@ -387,10 +393,11 @@ export class Store {
 
   private editBody(chat: string, id: string, body: string, type?: string) {
     const cid = this.pj(chat);
-    const r = this.sql.exec<{ data: ArrayBuffer }>(`SELECT data FROM messages WHERE chat = ? AND id = ?`, cid, id).toArray()[0];
+    const r = this.sql.exec<{ ts: number; data: ArrayBuffer }>(`SELECT ts, data FROM messages WHERE chat = ? AND id = ?`, cid, id).toArray()[0];
     if (!r) return;
     const blob = this.vault.open<MsgBlob>(r.data, MSG);
     blob.b = body;
+    this.index.add(cid, r.ts, body);
     this.sql.exec(`UPDATE messages SET data = ?${type ? ', type = ?' : ''} WHERE chat = ? AND id = ?`, ...[this.vault.seal(blob, MSG), ...(type ? [type] : []), cid, id]);
   }
 
@@ -422,6 +429,7 @@ export class Store {
       id, cid, r.ts, r.fromMe ? 1 : 0, sender, 'reaction', this.vault.seal(blob, MSG),
     );
     if (!r.fromMe) this.noteLid(r.senderJid, sender);
+    this.index.add(cid, r.ts, blob.b);
     return old ? 0 : 1;
   }
 
@@ -482,6 +490,7 @@ export class Store {
             key.id, cid, ts, key.fromMe ? 1 : 0, sender, d.type, this.vault.seal(blob, MSG),
           );
           this.noteLid(senderJid, sender);
+          this.index.add(cid, ts, d.body);
           added++;
         } else if (existing.sender == null || msg.pushName) {
           // a repeat delivery can still fill in who sent it, or their push name
@@ -509,6 +518,7 @@ export class Store {
         if (seen.push && seen.push.ts >= (rec.pushTs ?? -1)) { rec.push = seen.push.p; rec.pushTs = seen.push.ts; changed = true; }
         if (changed) this.putChat(rec);
       }
+      this.index.flush(); // one filter write per block touched by the batch
     });
     this.dirty();
     return added;
@@ -667,29 +677,43 @@ export class Store {
     const wants = opts.queries.map((q) => ({ terms: parseQuery(q), hits: [] as SearchHit[] }));
     const live = new Set(wants.filter((w) => w.terms.length));
     if (!live.size) return { hits: wants.map(() => []), scanned: 0 };
-    const where: string[] = [];
-    const args: (string | number)[] = [];
-    if (opts.chat) { where.push(`chat = ?`); args.push(this.pj(opts.chat)); }
-    if (opts.since) { where.push(`ts >= ?`); args.push(opts.since); }
-    if (opts.until) { where.push(`ts <= ?`); args.push(opts.until); }
+    if (!this.index.ready()) this.index.build(); // a store from before the index: build it once, now
     const s = this.snapshot();
     const jidOf = new Map<string, string>();
     for (const [cid, rec] of s.chats) jidOf.set(cid, rec.jid);
-    const cursor = this.sql.exec<{ id: string; chat: string; ts: number; from_me: number; sender: string | null; data: ArrayBuffer }>(
-      `SELECT id, chat, ts, from_me, sender, data FROM messages ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY ts DESC`, ...args,
-    );
+    const byTs = (a: SearchHit, b: SearchHit) => b.ts - a.ts;
+
+    // the blocks that might hold a match, newest first; a block whose filter rules a query out is never read
+    const blocks = this.index.candidates({
+      chat: opts.chat ? this.pj(opts.chat) : undefined, since: opts.since, until: opts.until,
+      needs: wants.map((w) => (w.terms.length ? needsOf(w.terms) : [])),
+    });
     let scanned = 0;
-    for (const row of cursor) {
-      scanned++;
-      const blob = this.vault.open<MsgBlob>(row.data, MSG);
-      for (const w of live) {
-        if (!matches(blob.b, w.terms)) continue;
-        const jid = jidOf.get(row.chat) ?? row.chat;
-        w.hits.push({ id: row.id, chat: jid, chat_name: this.nameOf(jid, s).name, ts: row.ts, sender: this.senderLabel(row, blob, s), body: blob.b });
-        if (w.hits.length >= opts.limit) live.delete(w);
-      }
+    for (const b of blocks) {
+      // a query is done once it has `limit` hits at least as new as anything left to read
+      for (const w of live) if (w.hits.length >= opts.limit && w.hits[opts.limit - 1].ts >= b.last) live.delete(w);
       if (!live.size) break;
+      const here = b.queries.map((q) => wants[q]).filter((w) => live.has(w));
+      if (!here.length) continue;
+      const where = [`chat = ?`, `ts >= ?`, `ts < ?`];
+      const args: (string | number)[] = [b.chat, b.from, b.to];
+      if (opts.since) { where.push(`ts >= ?`); args.push(opts.since); }
+      if (opts.until) { where.push(`ts <= ?`); args.push(opts.until); }
+      const rows = this.sql.exec<{ id: string; chat: string; ts: number; from_me: number; sender: string | null; data: ArrayBuffer }>(
+        `SELECT id, chat, ts, from_me, sender, data FROM messages WHERE ${where.join(' AND ')} ORDER BY ts DESC`, ...args,
+      );
+      for (const row of rows) {
+        scanned++;
+        const blob = this.vault.open<MsgBlob>(row.data, MSG);
+        for (const w of here) {
+          if (!matches(blob.b, w.terms)) continue;
+          const jid = jidOf.get(row.chat) ?? row.chat;
+          w.hits.push({ id: row.id, chat: jid, chat_name: this.nameOf(jid, s).name, ts: row.ts, sender: this.senderLabel(row, blob, s), body: blob.b });
+        }
+      }
+      for (const w of here) { w.hits.sort(byTs); w.hits.length = Math.min(w.hits.length, opts.limit); }
     }
     return { hits: wants.map((w) => w.hits), scanned };
   }
+
 }

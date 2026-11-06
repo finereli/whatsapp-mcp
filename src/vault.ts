@@ -98,6 +98,8 @@ export class Vault {
   private enc: Buffer;
   private ids: Buffer;
   private memo = new Map<string, string>();
+  private bitsMemo = new Map<string, Uint32Array>();
+  private readonly words: Buffer;
   readonly fingerprint: string;
 
   constructor(dek: Uint8Array) {
@@ -105,6 +107,7 @@ export class Vault {
     if (k.length !== 32) throw new Error('bad key');
     this.enc = hmac(k, 'enc');
     this.ids = hmac(k, 'ids');
+    this.words = hmac(k, 'search-words');
     this.fingerprint = hmac(k, 'fingerprint').toString('base64').slice(0, 12);
   }
 
@@ -116,6 +119,22 @@ export class Vault {
   }
   open<T = any>(blob: ArrayBuffer | Uint8Array, aad: string): T {
     return JSON.parse(openBytes(this.enc, toBuf(blob), aad).toString('utf8'));
+  }
+
+  /**
+   * Where a search word goes in a block's Bloom filter: `k` bit positions out of `bits`, from a keyed hash, so
+   * without this user's key the filter can't be tested for any word. Memoized, since vocabularies repeat.
+   */
+  wordBits(word: string, k: number, bits: number): Uint32Array {
+    let v = this.bitsMemo.get(word);
+    if (v === undefined) {
+      const h = hmac(this.words, word);
+      v = new Uint32Array(k);
+      for (let i = 0; i < k; i++) v[i] = h.readUInt32LE(i * 4) % bits;
+      if (this.bitsMemo.size > 100_000) this.bitsMemo.clear();
+      this.bitsMemo.set(word, v);
+    }
+    return v;
   }
 
   /**
