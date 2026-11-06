@@ -230,6 +230,7 @@ Don't log a key, put one in a URL, or store one anywhere that outlives a session
 | `src/pages.ts`, `src/landing.ts`, `src/privacy.ts`, `src/tos.ts`, `src/ui.ts` | All HTML. `ui.ts` has the shared design tokens. |
 | `src/ws-shim.ts`, `src/lru-shim.ts`, `src/polyfills.ts` | Make Baileys run on workerd. See below. |
 | `scripts/vendor-bridge.mjs` | Extracts the wasm from Baileys' Rust bridge. Runs on `npm install`. |
+| `scripts/pull-config.mjs` | Rebuilds `wrangler.local.jsonc` from the live Worker. |
 | `local-export/` | A separate one-off script that dumps your history to JSON files with no server. Not part of the deployment. |
 
 ## How sessions work
@@ -324,6 +325,8 @@ These all cost real time to find. Read them before touching the Baileys parts.
 | `REGISTRY` | binding | One Durable Object that counts accounts, so `SIGNUP_LIMIT` is a real cap. |
 
 Keep a deployment's own values (domain, KV id) in `wrangler.local.jsonc`, which is gitignored, and deploy with `npm run deploy:local`. `wrangler.jsonc` is the template other people start from.
+
+Lost that file, or deploying from a new machine? `CLOUDFLARE_API_TOKEN=... node scripts/pull-config.mjs` rebuilds it from the live Worker: vars, KV and Durable Object bindings, email, custom domains, crons and limits, with `wrangler.jsonc` filling in what Cloudflare doesn't report. Secrets stay on Cloudflare and are only listed by name. If the live Worker has applied more Durable Object migrations than `wrangler.jsonc` lists (because it was once deployed from a config with its own steps), the script pads the list with empty placeholder steps up to the live tag; without them, wrangler refuses to deploy. Check the result with `npx wrangler deploy -c wrangler.local.jsonc --dry-run`.
 
 ## Adapting it
 
