@@ -33,7 +33,9 @@ export class Registry extends DurableObject {
   /** Add someone to the waitlist. `added` is false if they were already on it. `waiting` is the list's length. */
   join(email: string, source: string): { added: boolean; waiting: number } {
     const sql = this.ctx.storage.sql;
-    const added = sql.exec(`INSERT OR IGNORE INTO waitlist (email, at, source) VALUES (?, ?, ?)`, email, Date.now(), source).rowsWritten > 0;
+    const c = sql.exec(`INSERT OR IGNORE INTO waitlist (email, at, source) VALUES (?, ?, ?)`, email, Date.now(), source);
+    c.toArray(); // a cursor counts rows as it is read
+    const added = c.rowsWritten > 0;
     return { added, waiting: this.waiting() };
   }
 
@@ -49,6 +51,8 @@ export class Registry extends DurableObject {
 
   /** Take someone off the list, e.g. once they've been let in. */
   unlist(email: string): boolean {
-    return this.ctx.storage.sql.exec(`DELETE FROM waitlist WHERE email = ?`, email).rowsWritten > 0;
+    const c = this.ctx.storage.sql.exec(`DELETE FROM waitlist WHERE email = ?`, email);
+    c.toArray();
+    return c.rowsWritten > 0;
   }
 }

@@ -310,5 +310,54 @@ const cases: [string, string | undefined, string | null][] = [
 ];
 for (const [i, cc, want] of cases) check(`toJid(${JSON.stringify(i)}, ${cc})`, toJid(i, cc) === want, toJid(i, cc));
 
+// ---------- running totals and lid senders ----------
+{
+  // the totals must always equal a fresh count, whatever path wrote the messages
+  const { db: tdb, sql: tsql } = makeSql();
+  initSchema(tsql);
+  const ts_ = new Store(tsql, (fn) => fn(), vault);
+  const truth = () => JSON.stringify(tdb.prepare(`SELECT chat, COUNT(*) n, MAX(ts) last FROM messages GROUP BY chat ORDER BY chat`).all());
+  const kept = () => JSON.stringify(tdb.prepare(`SELECT chat, n, last FROM chat_stats ORDER BY chat`).all());
+  const same = (name: string) => check(`totals match a recount: ${name}`, truth() === kept(), { truth: truth(), kept: kept() });
+  const A = '972500000011@s.whatsapp.net', G = '5555@g.us', L = '11223344@lid', LPN = '972500000012@s.whatsapp.net';
+  const R = (id: string, chat: string, ts: number, target: string, text: string, fromMe = false, key: any = {}) =>
+    ({ key: { id, remoteJid: chat, fromMe, ...key }, messageTimestamp: ts, message: { reactionMessage: { key: { id: target }, text, senderTimestampMs: ts * 1000 } } }) as any;
+
+  ts_.ingestMessages([M('t1', A, 100, 'one'), M('t2', A, 300, 'two'), M('t3', A, 200, 'three, arriving late')]);
+  same('inserts, out of order');
+  ts_.ingestMessages([M('t1', A, 100, 'one')]);
+  same('a repeat delivery');
+  ts_.ingestMessages([R('r1', A, 400, 't1', '👍', true)]);
+  same('a reaction adds a line');
+  ts_.ingestMessages([R('r2', A, 410, 't1', '❤️', true)]);
+  same('a new emoji replaces it');
+  ts_.ingestMessages([R('r3', A, 420, 't1', '', true)]);
+  same('taking it back removes the newest line');
+  check('and the latest time falls back', (tdb.prepare(`SELECT last FROM chat_stats`).get() as any)?.last === 300);
+  ts_.ingestMessages([M('g1', G, 500, 'hi all', false, { key: { participant: L } }), M('d1', L, 510, 'direct from a lid')]);
+  same('a group message from a lid, and a lid chat');
+  check('the lid sender is noted', (tdb.prepare(`SELECT COUNT(*) n FROM lid_senders`).get() as any).n >= 1);
+  ts_.addAlias(L, LPN);
+  same('the lid chat folds into the number');
+  check('the lid is no longer pending', (tdb.prepare(`SELECT COUNT(*) n FROM lid_senders`).get() as any).n === 0);
+  check('the group message now names the number', (ts_.getMessages({ chat: G, limit: 5 }) as any[])[0]?.sender !== 'unknown');
+  const c = ts_.counts();
+  check('counts come from the totals', c.messages === 5 && c.chats === 3, c);
+
+  // a mapping for a lid that never sent anything does no message work
+  const before = tdb.prepare(`SELECT COUNT(*) n FROM messages`).get();
+  ts_.addAlias('55555@lid', '972500000013@s.whatsapp.net');
+  same('a mapping for an unseen lid');
+  check('and changes no messages', JSON.stringify(tdb.prepare(`SELECT COUNT(*) n FROM messages`).get()) === JSON.stringify(before));
+
+  // a store from before the totals existed gets them filled once
+  tdb.exec(`DROP TRIGGER chat_stats_ai; DROP TRIGGER chat_stats_ad; DROP TRIGGER chat_stats_au; DROP TABLE chat_stats; DROP TABLE lid_senders;`);
+  tdb.exec(`INSERT INTO messages (id, chat, ts, from_me, sender, type, data) SELECT 'copy-' || id, chat, ts + 1000, from_me, sender, type, data FROM messages`);
+  initSchema(tsql);
+  same('an older store is filled on upgrade');
+  ts_.reset();
+  check('and counts work after it', ts_.counts().messages === 10, ts_.counts());
+}
+
 console.log(failed ? `\n${failed} FAILED` : '\nall passed');
 process.exit(failed ? 1 : 0);

@@ -35,7 +35,53 @@ function createTables(sql: SqlStorage) {
     CREATE TABLE IF NOT EXISTS alias (cid TEXT PRIMARY KEY, data BLOB NOT NULL);
     CREATE TABLE IF NOT EXISTS auth (k TEXT PRIMARY KEY, data BLOB NOT NULL);
   `);
+  createDerived(sql);
 }
+
+/**
+ * Small tables kept in step with messages, so common questions don't scan every message. Reads are cheap on
+ * Durable Objects but not free, and a scan of a big history on every status check adds up.
+ *
+ * chat_stats: how many messages each chat has and when the latest is. Triggers keep it right whatever path
+ * writes a message (insert, delete, a chat merged into another), at one extra row written per message.
+ *
+ * lid_senders: senders stored under a WhatsApp "lid" (an id with no phone number). When WhatsApp later says
+ * which number a lid is, only these need rewriting; for everyone else there is nothing to look for.
+ * It may hold ids that aren't lids (the first fill can't tell them apart); that only costs a lookup.
+ */
+function createDerived(sql: SqlStorage) {
+  const fresh = !tableExists(sql, 'chat_stats');
+  sql.exec(`
+    CREATE TABLE IF NOT EXISTS chat_stats (chat TEXT PRIMARY KEY, n INTEGER NOT NULL, last INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS lid_senders (sender TEXT PRIMARY KEY);
+    CREATE TRIGGER IF NOT EXISTS chat_stats_ai AFTER INSERT ON messages BEGIN
+      INSERT INTO chat_stats (chat, n, last) VALUES (new.chat, 1, new.ts)
+        ON CONFLICT (chat) DO UPDATE SET n = n + 1, last = MAX(last, excluded.last);
+    END;
+    CREATE TRIGGER IF NOT EXISTS chat_stats_ad AFTER DELETE ON messages BEGIN
+      UPDATE chat_stats SET n = n - 1, last = COALESCE((SELECT MAX(ts) FROM messages WHERE chat = old.chat), 0) WHERE chat = old.chat;
+      DELETE FROM chat_stats WHERE chat = old.chat AND n <= 0;
+    END;
+    CREATE TRIGGER IF NOT EXISTS chat_stats_au AFTER UPDATE OF chat, ts ON messages
+      WHEN old.chat IS NOT new.chat OR old.ts IS NOT new.ts BEGIN
+      UPDATE chat_stats SET n = n - 1, last = COALESCE((SELECT MAX(ts) FROM messages WHERE chat = old.chat), 0) WHERE chat = old.chat;
+      DELETE FROM chat_stats WHERE chat = old.chat AND n <= 0;
+      INSERT INTO chat_stats (chat, n, last) VALUES (new.chat, 1, new.ts)
+        ON CONFLICT (chat) DO UPDATE SET n = n + 1, last = MAX(last, excluded.last);
+    END;
+  `);
+  if (fresh) fillDerived(sql); // a store from before these tables: one scan, once
+}
+
+/** Build the derived tables from the messages already stored. */
+function fillDerived(sql: SqlStorage) {
+  sql.exec(`DELETE FROM chat_stats`);
+  sql.exec(`INSERT INTO chat_stats (chat, n, last) SELECT chat, COUNT(*), MAX(ts) FROM messages GROUP BY chat`);
+  sql.exec(`INSERT OR IGNORE INTO lid_senders (sender) SELECT DISTINCT sender FROM messages WHERE sender IS NOT NULL AND sender != 'me'`);
+}
+
+/** Rows a write statement changed. The cursor is drained first, since a Durable Object counts as it goes. */
+const written = (c: SqlStorageCursor<any>) => { c.toArray(); return c.rowsWritten; };
 
 const tableExists = (sql: SqlStorage, name: string) => sql.exec(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`, name).toArray().length > 0;
 
@@ -102,6 +148,7 @@ export function migrateLegacy(sql: SqlStorage, vault: Vault, tx: <T>(fn: () => T
       }
       after = rows[rows.length - 1].rid;
     }
+    fillDerived(sql);
 
     const seen = new Set<string>();
     if (tableExists(sql, 'legacy_chats')) {
@@ -264,7 +311,7 @@ export class Store {
   private chatStats() {
     if (this.stats) return this.stats;
     const m = new Map<string, { n: number; last: number }>();
-    for (const r of this.sql.exec<{ chat: string; n: number; last: number }>(`SELECT chat, COUNT(*) AS n, MAX(ts) AS last FROM messages GROUP BY chat`).toArray()) m.set(r.chat, { n: r.n, last: r.last });
+    for (const r of this.sql.exec<{ chat: string; n: number; last: number }>(`SELECT chat, n, last FROM chat_stats`).toArray()) m.set(r.chat, { n: r.n, last: r.last });
     return (this.stats = m);
   }
 
@@ -322,7 +369,8 @@ export class Store {
     this.sql.exec(`INSERT OR REPLACE INTO alias (cid, data) VALUES (?, ?)`, L, this.vault.seal({ lid, pn }, ALIAS));
     this.aliases().set(lid, pn);
     // fold anything already stored under the lid into the phone-number jid
-    for (const r of this.sql.exec<{ chat: string; id: string; data: ArrayBuffer }>(`SELECT chat, id, data FROM messages WHERE sender = ?`, L).toArray()) {
+    const sentAsLid = written(this.sql.exec(`DELETE FROM lid_senders WHERE sender = ?`, L)) > 0;
+    if (sentAsLid) for (const r of this.sql.exec<{ chat: string; id: string; data: ArrayBuffer }>(`SELECT chat, id, data FROM messages WHERE sender = ?`, L).toArray()) {
       const blob = this.vault.open<MsgBlob>(r.data, MSG);
       blob.s = pn;
       this.sql.exec(`UPDATE messages SET sender = ?, data = ? WHERE chat = ? AND id = ?`, P, this.vault.seal(blob, MSG), r.chat, r.id);
@@ -367,10 +415,13 @@ export class Store {
     const blob: MsgBlob = { b: `[reacted ${r.emoji}${quote}]` };
     if (r.push) blob.p = r.push;
     if (!r.fromMe && r.senderJid) blob.s = r.senderJid;
+    // delete then insert, not INSERT OR REPLACE: a replace removes the old row without running delete triggers
+    if (old) this.sql.exec(`DELETE FROM messages WHERE chat = ? AND id = ?`, cid, id);
     this.sql.exec(
-      `INSERT OR REPLACE INTO messages (id, chat, ts, from_me, sender, type, data) VALUES (?,?,?,?,?,?,?)`,
+      `INSERT INTO messages (id, chat, ts, from_me, sender, type, data) VALUES (?,?,?,?,?,?,?)`,
       id, cid, r.ts, r.fromMe ? 1 : 0, sender, 'reaction', this.vault.seal(blob, MSG),
     );
+    if (!r.fromMe) this.noteLid(r.senderJid, sender);
     return old ? 0 : 1;
   }
 
@@ -430,6 +481,7 @@ export class Store {
             `INSERT INTO messages (id, chat, ts, from_me, sender, type, data) VALUES (?,?,?,?,?,?,?)`,
             key.id, cid, ts, key.fromMe ? 1 : 0, sender, d.type, this.vault.seal(blob, MSG),
           );
+          this.noteLid(senderJid, sender);
           added++;
         } else if (existing.sender == null || msg.pushName) {
           // a repeat delivery can still fill in who sent it, or their push name
@@ -440,6 +492,7 @@ export class Store {
             if (fillPush) blob.p = msg.pushName!;
             if (fillSender && senderJid && senderJid !== 'me') blob.s = senderJid;
             this.sql.exec(`UPDATE messages SET sender = COALESCE(sender, ?), data = ? WHERE chat = ? AND id = ?`, sender, this.vault.seal(blob, MSG), cid, key.id);
+            if (fillSender) this.noteLid(senderJid, sender);
           }
         }
 
@@ -525,8 +578,13 @@ export class Store {
   }
 
   counts() {
-    const one = (q: string) => this.sql.exec<{ n: number }>(q).toArray()[0].n;
-    return { messages: one(`SELECT COUNT(*) n FROM messages`), chats: one(`SELECT COUNT(DISTINCT chat) n FROM messages`) };
+    const r = this.sql.exec<{ messages: number; chats: number }>(`SELECT COALESCE(SUM(n), 0) AS messages, COUNT(*) AS chats FROM chat_stats`).toArray()[0];
+    return { messages: r.messages, chats: r.chats };
+  }
+
+  /** A sender stored under a lid, so a later lid-to-number mapping knows there is something to rewrite. */
+  private noteLid(jid: string | null | undefined, pid: string | null) {
+    if (pid && jid?.endsWith('@lid')) this.sql.exec(`INSERT OR IGNORE INTO lid_senders (sender) VALUES (?)`, pid);
   }
 
   // ----- queries -----

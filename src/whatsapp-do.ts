@@ -264,7 +264,10 @@ export class WhatsAppStore extends DurableObject<Env> {
   private async reject(total: number) {
     this.setMeta('rejected', JSON.stringify({ messages: total, at: Date.now() }));
     await this.logout();
-    for (const t of ['messages', 'chats', 'contacts', 'custom_names', 'alias']) this.ctx.storage.sql.exec(`DELETE FROM ${t}`);
+    // chat_stats and lid_senders go first, so deleting the messages doesn't run the stats triggers row by row
+    this.ctx.storage.sql.exec(`DROP TRIGGER IF EXISTS chat_stats_ad`);
+    for (const t of ['chat_stats', 'lid_senders', 'messages', 'chats', 'contacts', 'custom_names', 'alias']) this.ctx.storage.sql.exec(`DELETE FROM ${t}`);
+    initSchema(this.ctx.storage.sql); // puts the trigger back
     this.keyed().store.reset();
   }
 
