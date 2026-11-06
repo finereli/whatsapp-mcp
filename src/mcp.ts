@@ -255,6 +255,9 @@ function buildServer(wa: DurableObjectStub<WhatsAppStore>, env: Env, origin: str
 }
 
 export async function handleMcp(request: Request, env: Env, who: McpProps): Promise<Response> {
+  // Stateless: no server-to-client stream (GET) and no session to end (DELETE). The spec's answer is 405.
+  // Without it the SDK opens a stream that never sends, the request dies, and clients reconnect in a tight loop.
+  if (request.method !== 'POST') return new Response(null, { status: 405, headers: { allow: 'POST' } });
   const wa = await unlockedStub(env, who);
   const server = buildServer(wa, env, new URL(request.url).origin, await wa.timezone());
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

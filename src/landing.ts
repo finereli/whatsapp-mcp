@@ -4,6 +4,7 @@
  */
 
 import { baseCss, copyScript, esc, iconLinks, xLink } from './ui.js';
+import { waitlistCss, waitlistForm } from './pages.js';
 
 const REPO = 'https://github.com/finereli/whatsapp-mcp';
 const REPO_API = 'https://api.github.com/repos/finereli/whatsapp-mcp';
@@ -31,12 +32,16 @@ const SCENE = { q: 'When did Dana say the flights were booked?', found: 'Searche
 const STATUS = 'Searching WhatsApp messages...';
 
 /** What an assistant reads when someone pastes "set this up for me". Plain text, no markup. */
-export function llmsTxt(origin: string, hosted: boolean): string {
+export function llmsTxt(origin: string, hosted: boolean, full = false): string {
   const mcp = `${origin}/mcp`;
   return `# WhatsApp MCP
 
 A read-only MCP server that lets an AI assistant search and read the user's own WhatsApp messages. It cannot send, edit or delete anything. Open source: ${REPO}
+${hosted && full ? `
+## Full right now
 
+Every seat on this hosted copy is taken, so new users can't sign up yet. Tell the user that first. They can join the waitlist on ${origin} to hear when a seat opens, or run their own copy from the source (no limit, needs a Cloudflare account). Someone who already has an account can still follow the steps below.
+` : ''}
 ## If a user asked you to set this up
 
 The MCP endpoint is ${mcp} (streamable HTTP, OAuth with dynamic client registration).
@@ -61,8 +66,12 @@ ${hosted
 ${hosted ? '- It is a free beta with limited seats, and each account has a size limit. Bigger histories can run their own copy from the source.\n' : ''}`;
 }
 
-/** `signupLimit` and `maxMessages` are the caps in force, 0 for none. `contact` is the operator's X handle. */
-export function landingPage(origin: string, hosted = false, caps: { signupLimit?: number; maxMessages?: number; contact?: string } = {}): string {
+/**
+ * `signupLimit` and `maxMessages` are the caps in force, 0 for none. `contact` is the operator's X handle.
+ * `full` means every seat is taken: the page says so up front and offers the waitlist instead of a signup.
+ */
+export function landingPage(origin: string, hosted = false, caps: { signupLimit?: number; maxMessages?: number; contact?: string; full?: boolean } = {}): string {
+  const full = hosted && Boolean(caps.full);
   const mcp = `${origin}/mcp`;
   const claudeCode = `claude mcp add --transport http whatsapp ${mcp}`;
   const subline = hosted
@@ -106,7 +115,8 @@ main { max-width: none; padding: 0; }
 h1 { font-size: clamp(2.6rem, 9vw, 4.2rem); margin-bottom: 14px; }
 .lede { font-size: 1.2rem; max-width: 30rem; margin-bottom: 26px; }
 
-.actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 10px; }
+.full { margin-bottom: 20px; }
+${waitlistCss}.actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 10px; }
 .repo { display: inline-flex; align-items: center; gap: 9px; padding: 12px 16px; border-radius: 10px; border: 1.5px solid var(--ink); text-decoration: none; font: 600 0.95rem/1 ui-sans-serif, system-ui, sans-serif; }
 .repo:hover { background: var(--code); }
 .repo .count { display: none; align-items: center; gap: 5px; padding-left: 10px; margin-left: 2px; border-left: 1.5px solid var(--rule); }
@@ -160,6 +170,8 @@ h1 { font-size: clamp(2.6rem, 9vw, 4.2rem); margin-bottom: 14px; }
 .how { padding-top: 40px; padding-bottom: 8px; }
 .steps { list-style: none; padding: 0; margin: 0; display: grid; gap: 30px; counter-reset: step; max-width: 40rem; }
 .steps > li { counter-increment: step; padding-left: 44px; position: relative; }
+.steps > li { min-width: 0; }
+.steps .alt code { overflow-wrap: anywhere; }
 .steps > li::before { content: counter(step); position: absolute; left: 0; top: 1px; width: 28px; height: 28px; border-radius: 50%; border: 1.5px solid var(--ink); display: grid; place-items: center; font: 600 0.9rem/1 ui-sans-serif, system-ui, sans-serif; }
 .alt { margin: 0; }
 
@@ -186,13 +198,17 @@ footer p { margin: 0; max-width: none; }
     <h1>WhatsApp MCP</h1>
     <p class="lede">${esc(subline)}</p>
 
+    ${full ? `<div class="full" id="waitlist">
+      <p class="notice"><strong>Full for now.</strong> All ${caps.signupLimit ? caps.signupLimit.toLocaleString() + ' ' : ''}seats are taken. Leave your email and you'll hear when one opens. Already signed up? <a href="/setup">Sign in</a>.</p>
+      ${waitlistForm('landing')}
+    </div>` : ''}
     <div class="actions">
-      <a class="button" href="/setup">${hosted ? 'Get started' : 'Link WhatsApp'}</a>
+      ${full ? '' : `<a class="button" href="/setup">${hosted ? 'Get started' : 'Link WhatsApp'}</a>`}
       <a class="repo" href="${REPO}" rel="noopener">${githubIcon}<span>Open source on GitHub</span><span class="count" id="stars">${starIcon}<span id="starCount"></span></span></a>
     </div>
     <p class="muted oss">MIT licensed. ${hosted ? 'Use this one, or run your own copy.' : 'Read it, change it, fork it.'} Built by ${xLink('finereli')}.</p>
 
-    <div class="agents" role="group" aria-labelledby="agents-h">
+    <div class="agents" role="group" aria-labelledby="agents-h"${full ? ' hidden' : ''}>
       <h2 id="agents-h">Or have your assistant set it up</h2>
       <div class="row">
         ${AGENTS.map((a) => `<button class="agent" type="button" data-name="${esc(a.name)}" data-url="${esc(a.url)}">${a.icon}${esc(a.name)}</button>`).join('\n        ')}

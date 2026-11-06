@@ -29,6 +29,7 @@ p { margin: 0 0 16px; max-width: 34rem; }
 a { color: inherit; }
 .muted { color: var(--muted); font-size: 0.94rem; }
 .err { color: var(--err); font-size: 0.94rem; }
+.notice { border-left: 3px solid var(--action); padding: 8px 0 8px 14px; }
 code { background: var(--code); border-radius: 5px; padding: 1px 6px; font: 0.88em ui-monospace, SFMono-Regular, Menlo, monospace; }
 
 .button, button.primary { display: inline-block; font: 600 1rem/1 ui-sans-serif, system-ui, sans-serif; padding: 13px 20px; border-radius: 10px; background: var(--action); color: var(--action-ink); text-decoration: none; border: 0; cursor: pointer; }

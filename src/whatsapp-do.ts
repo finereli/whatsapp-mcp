@@ -17,7 +17,7 @@ import { makeWASocket, DisconnectReason } from '@whiskeysockets/baileys';
 import type { WASocket } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-generator';
 import { sqliteAuthState } from './auth-state.js';
-import { Store, initSchema, isLegacy, migrateLegacy } from './store.js';
+import { Store, hasSchema, initSchema, isLeftover, isLegacy, migrateLegacy } from './store.js';
 import { Vault } from './vault.js';
 import { limitsOf, verdict } from './limits.js';
 import { contactText, xHandle } from './ui.js';
@@ -70,7 +70,12 @@ export class WhatsAppStore extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    initSchema(ctx.storage.sql);
+    // Signing in asks every new person's object whether they have an account. Creating tables to answer that
+    // would leave storage behind for everyone, including people turned away because the service is full.
+    // So tables are made when an account is, and an empty leftover from before that is erased.
+    const sql = ctx.storage.sql;
+    if (isLeftover(sql)) ctx.blockConcurrencyWhile(() => ctx.storage.deleteAll());
+    else if (hasSchema(sql)) initSchema(sql);
   }
 
   // ---------- accounts and keys (no key needed) ----------
@@ -78,6 +83,7 @@ export class WhatsAppStore extends DurableObject<Env> {
   /** The stored account, and how long a login must wait if there have been too many wrong passwords. */
   account(): { record: AccountRecord | null; retryAfter: number } {
     const sql = this.ctx.storage.sql;
+    if (!hasSchema(sql)) return { record: null, retryAfter: 0 };
     const row = sql.exec<{ v: string }>(`SELECT v FROM account WHERE k = 'record'`).toArray()[0];
     const until = Number(this.meta('locked_until') ?? 0);
     return { record: row ? JSON.parse(row.v) : null, retryAfter: Math.max(0, until - Date.now()) };
@@ -86,6 +92,7 @@ export class WhatsAppStore extends DurableObject<Env> {
   /** Create the account. False if there already is one, so two signups for the same login can't both win. */
   createAccount(record: AccountRecord, timezone: string): boolean {
     const sql = this.ctx.storage.sql;
+    initSchema(sql);
     if (sql.exec(`SELECT 1 FROM account WHERE k = 'record'`).toArray().length) return false;
     sql.exec(`INSERT INTO account (k, v) VALUES ('record', ?)`, JSON.stringify(record));
     this.setMeta('tz', timezone);
@@ -123,6 +130,7 @@ export class WhatsAppStore extends DurableObject<Env> {
   unlock(dek: string) {
     if (this.unlocked?.dek === dek) return;
     const sql = this.ctx.storage.sql;
+    if (!hasSchema(sql)) throw new Error('no account');
     const tx = <T>(fn: () => T) => this.ctx.storage.transactionSync(fn);
     const vault = Vault.fromBase64(dek);
     if (isLegacy(sql)) migrateLegacy(sql, vault, tx);
@@ -225,8 +233,7 @@ export class WhatsAppStore extends DurableObject<Env> {
     try { await this.logout(); } catch {}
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
-    this.unlocked = null;
-    initSchema(this.ctx.storage.sql); // so a later sign-up on this login starts from a clean slate
+    this.unlocked = null; // a later sign-up on this login makes fresh tables in createAccount
   }
 
   linkInfo() {

@@ -140,11 +140,12 @@ export const loginServiceUrl = (env: AuthEnv, origin: string, p: string) =>
   `${loginService(env)}/start?return=${encodeURIComponent(`${origin}/auth/callback?p=${p}`)}`;
 
 /** Trade the one-time code for who the person is and their data key. Null if the code is no good. */
-export async function redeemLoginCode(env: AuthEnv, code: string): Promise<{ sub: string; key: string } | null> {
+export async function redeemLoginCode(env: AuthEnv, code: string): Promise<{ sub: string; key: string; email?: string } | null> {
   const res = await fetch(`${loginService(env)}/exchange`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code, key: true }) });
   if (!res.ok) return null;
-  const body = (await res.json()) as { key?: string; user?: { sub?: string } };
-  return body.key && body.user?.sub ? { sub: body.user.sub, key: body.key } : null;
+  const body = (await res.json()) as { key?: string; user?: { sub?: string; email?: string } };
+  // the email is never stored with the account; it only fills in the waitlist form if the service is full
+  return body.key && body.user?.sub ? { sub: body.user.sub, key: body.key, email: body.user.email } : null;
 }
 
 /** A person the login service vouched for: open their account, or make one if they are new and there is room. */

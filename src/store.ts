@@ -39,6 +39,21 @@ function createTables(sql: SqlStorage) {
 
 const tableExists = (sql: SqlStorage, name: string) => sql.exec(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`, name).toArray().length > 0;
 
+/** Has anything ever been stored here? Asking writes nothing, so an object that only gets asked stays free. */
+export const hasSchema = (sql: SqlStorage) => tableExists(sql, 'account');
+
+/**
+ * Tables but no account, no messages and no linked phone: what an earlier version left behind for every person
+ * who tried to sign up while the service was full. Safe to erase. A plaintext store from the first release has
+ * no account record yet but does have messages, so it never counts.
+ */
+export function isLeftover(sql: SqlStorage): boolean {
+  if (!hasSchema(sql) || sql.exec(`SELECT 1 FROM account WHERE k = 'record'`).toArray().length) return false;
+  if (sql.exec(`SELECT 1 FROM meta WHERE k = 'paired' AND v = '1'`).toArray().length) return false;
+  for (const t of ['messages', 'legacy_messages']) if (tableExists(sql, t) && sql.exec(`SELECT 1 FROM ${t} LIMIT 1`).toArray().length) return false;
+  return true;
+}
+
 /** The first release stored everything in plaintext, with a `body` column. */
 export function isLegacy(sql: SqlStorage): boolean {
   const row = sql.exec<{ sql: string }>(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages'`).toArray()[0];

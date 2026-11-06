@@ -65,6 +65,7 @@ function hostedPolicy(operator?: string, contact?: string) {
 <h2>What it reads</h2>
 <p><strong>WhatsApp messages.</strong> You link your phone to the service as a linked device, the way WhatsApp Web works. The service then receives your messages and chat names.</p>
 <p><strong>Your account.</strong> You sign in with Google through a login service. It sees your email and name when you do; this service does not keep them. It keeps an anonymous id made from your Google account id, and a copy of your data key locked by the key the login service gives it.</p>
+<p><strong>The waitlist.</strong> If the service is full and you join the waitlist, it keeps the email you give and when you gave it, only to tell you when there is a seat. It is not tied to your messages or account, and it is deleted once you're let in, or whenever you ask.</p>
 <p><strong>Names.</strong> Your AI agent can save a name for a phone number, for example after finding it in your contacts. The service stores the name and number the agent gives it, next to your messages. It never connects to a contacts service itself.</p>
 
 <h2>What it keeps</h2>

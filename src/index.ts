@@ -11,7 +11,7 @@ import { OAuthProvider } from '@cloudflare/workers-oauth-provider';
 import type { OAuthHelpers } from '@cloudflare/workers-oauth-provider';
 import { WhatsAppStore } from './whatsapp-do.js';
 import { handleMcp } from './mcp.js';
-import { consentPage, fullPage, loginPage, messagePage, pairPage } from './pages.js';
+import { consentPage, fullPage, loginPage, messagePage, pairPage, waitlistDonePage, waitlistErrorPage } from './pages.js';
 import { limitsOf } from './limits.js';
 import { notify } from './notify.js';
 import { xHandle } from './ui.js';
@@ -51,6 +51,20 @@ const cookieValue = (r: Request, name: string) => r.headers.get('cookie')?.split
 const bearer = (r: Request) => r.headers.get('authorization')?.match(/^Bearer\s+(.+)$/i)?.[1];
 const plain = (title: string, msg: string, status: number) => html(messagePage(title, msg), status);
 const zone = (r: Request) => ((r as any).cf?.timezone as string | undefined) ?? 'UTC';
+const EMAIL = /^[^\s@<>"]{1,64}@[^\s@<>"]+\.[^\s@<>"]{2,}$/;
+const WAITLIST_SOURCES = new Set(['landing', 'sign-in', 'retry']);
+
+/**
+ * Is every seat taken? The front page asks on each visit, so the answer is kept for 30 seconds per isolate.
+ * Signups and deletions in this isolate refresh it straight away.
+ */
+let seatCache: { at: number; taken: number } | null = null;
+async function seatsFull(env: Env, limit: number): Promise<boolean> {
+  if (!limit || serverMode(env) !== 'multi') return false;
+  if (!seatCache || Date.now() - seatCache.at > 30_000) seatCache = { at: Date.now(), taken: await seatRegistry(env).count() };
+  return seatCache.taken >= limit;
+}
+const noteSeats = (taken: number) => { seatCache = { at: Date.now(), taken }; };
 
 function pinOk(request: Request, env: Env) {
   const sent = request.headers.get('x-pin');
@@ -105,7 +119,7 @@ const ownerHandler = {
     // Someone signed in lands on their dashboard. Everyone else gets the front page.
     if (path === '/') {
       const who = await readSession(env, cookieValue(request, SESSION_COOKIE));
-      return html(who ? pairPage(await mintSession(env, who, PAGE_SECONDS), null) : landingPage(url.origin, hosted, { signupLimit, maxMessages: limitsOf(env).messages, contact }));
+      return html(who ? pairPage(await mintSession(env, who, PAGE_SECONDS), null) : landingPage(url.origin, hosted, { signupLimit, maxMessages: limitsOf(env).messages, contact, full: await seatsFull(env, signupLimit) }));
     }
     // The logo, and the plain-text page an assistant reads when someone pastes "set this up for me".
     const asset = (body: BodyInit, type: string) => new Response(body, { headers: { 'content-type': type, 'cache-control': 'public, max-age=86400' } });
@@ -113,7 +127,7 @@ const ownerHandler = {
     if (path === '/favicon-32.png' || path === '/favicon.ico') return asset(FAVICON_32, 'image/png');
     if (path === '/apple-touch-icon.png') return asset(APPLE_TOUCH_ICON, 'image/png');
     if (path === '/og.png') return asset(SOCIAL_CARD, 'image/png');
-    if (path === '/llms.txt') return new Response(llmsTxt(url.origin, hosted), { headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'public, max-age=300' } });
+    if (path === '/llms.txt') return new Response(llmsTxt(url.origin, hosted, await seatsFull(env, signupLimit)), { headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'public, max-age=300' } });
     if (path === '/privacy') return html(privacyPage(env.OPERATOR_NAME, hosted, contact));
     if (path === '/tos') return html(tosPage(env.OPERATOR_NAME, hosted, contact));
     if (path === '/signout') return new Response(null, { status: 302, headers: { location: '/', 'set-cookie': sessionCookie('', 0) } });
@@ -122,7 +136,7 @@ const ownerHandler = {
     if (path === '/authorize') {
       const oauth = await env.OAUTH_PROVIDER.parseAuthRequest(request);
       const client = await env.OAUTH_PROVIDER.lookupClient(oauth.clientId);
-      return html(consentPage(client?.clientName ?? 'An app', await startSignIn(env, url.origin, { oauth })));
+      return html(consentPage(client?.clientName ?? 'An app', await startSignIn(env, url.origin, { oauth }), await seatsFull(env, signupLimit)));
     }
     if (path === '/setup') {
       return (await readSession(env, cookieValue(request, SESSION_COOKIE)))
@@ -155,8 +169,12 @@ const ownerHandler = {
       const person = await redeemLoginCode(env, code);
       if (!person) return plain('Sign-in failed', 'The login service did not accept that sign-in. Start again from the app that asked.', 400);
       const r = await signInWithLogin(env, person, zone(request));
-      if (!r.ok) return r.full ? html(fullPage(signupLimit, contact), 503) : plain('Sign-in failed', r.error, r.status);
-      if (r.seats) await milestone(env, r.seats.taken, r.seats.limit);
+      if (!r.ok) {
+        if (!r.full) return plain('Sign-in failed', r.error, r.status);
+        noteSeats(signupLimit);
+        return html(fullPage(signupLimit, contact, person.email), 503);
+      }
+      if (r.seats) { noteSeats(r.seats.taken); await milestone(env, r.seats.taken, r.seats.limit); }
       return proceed(env, p, r.who);
     }
 
@@ -175,7 +193,13 @@ const ownerHandler = {
       }
       if (path === '/pair/delete' && request.method === 'POST') {
         await wa.destroy();
-        if (!single) await seatRegistry(env).release(); // the seat goes back to the pool
+        if (!single) {
+          // the seat goes back to the pool; tell the operator if someone is waiting for it
+          const registry = seatRegistry(env);
+          noteSeats(await registry.release());
+          const waiting = await registry.waiting();
+          if (waiting) await notify(env, 'whatsapp-mcp has a free seat', `Someone deleted their account. ${waiting} on the waitlist.`);
+        }
         // agents that were connected can't reach a store that no longer exists
         for (let cursor: string | undefined; ; ) {
           const page = await env.OAUTH_PROVIDER.listUserGrants(who.userId, { cursor });
@@ -196,10 +220,28 @@ const ownerHandler = {
       }
     }
 
+    // Someone who couldn't get a seat leaves an email. Only the operator sees the list (/debug?u=waitlist).
+    if (path === '/waitlist' && request.method === 'POST' && hosted) {
+      const form = await request.formData();
+      if (String(form.get('website') ?? '')) return html(waitlistDonePage(true, contact)); // the field people can't see: a bot
+      const email = String(form.get('email') ?? '').trim().toLowerCase();
+      if (email.length > 254 || !EMAIL.test(email)) return html(waitlistErrorPage(contact), 400);
+      const source = String(form.get('source') ?? '');
+      const r = await seatRegistry(env).join(email, WAITLIST_SOURCES.has(source) ? source : 'landing');
+      if (r.added) await notify(env, 'whatsapp-mcp waitlist', `Someone joined the waitlist. ${r.waiting} waiting.`);
+      return html(waitlistDonePage(r.added, contact));
+    }
+
     // What a deployment's operator can see without anyone's key: whether a session is running, and its log.
     if (path === '/debug') {
       if (!pinOk(request, env)) return new Response('unauthorized', { status: 401 });
-      if (url.searchParams.get('u') === 'seats') return json({ taken: await seatRegistry(env).count(), limit: signupLimit });
+      const registry = seatRegistry(env);
+      if (url.searchParams.get('u') === 'seats') return json({ taken: await registry.count(), limit: signupLimit, waiting: await registry.waiting() });
+      if (url.searchParams.get('u') === 'waitlist') {
+        const email = url.searchParams.get('remove');
+        if (email && request.method === 'POST') return json({ removed: await registry.unlist(email.toLowerCase()) });
+        return json(await registry.waitlist());
+      }
       return json(await accountStub(env, url.searchParams.get('u') ?? 'owner').debug());
     }
 
