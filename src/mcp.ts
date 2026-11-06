@@ -46,6 +46,16 @@ function buildServer(wa: DurableObjectStub<WhatsAppStore>, env: Env, origin: str
     },
   );
 
+  // One log line per tool call: which tool and how long it took. Never arguments or results.
+  const register = server.registerTool.bind(server) as (...a: any[]) => any;
+  (server as any).registerTool = (name: string, config: unknown, handler: (...a: any[]) => Promise<any>) =>
+    register(name, config, async (...args: any[]) => {
+      const t0 = Date.now();
+      let ok = false;
+      try { const r = await handler(...args); ok = !r?.isError; return r; }
+      finally { console.log(JSON.stringify({ tool: name, ms: Date.now() - t0, ok })); }
+    });
+
   /** Top up from WhatsApp; never let a failed pull block reading what we already have. */
   const fresh = async (): Promise<string> => {
     try {
