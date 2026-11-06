@@ -68,6 +68,9 @@ export const MIN_PASSWORD = 12;
 export const userIdFor = (env: AuthEnv, sub?: string) =>
   isSingleUser(env) ? 'owner' : createHash('sha256').update(`whatsapp-mcp:google:${sub ?? ''}`).digest('hex').slice(0, 32);
 
+/** How many accounts the service takes (SIGNUP_LIMIT), 0 for no cap. Every page that mentions the limit reads it from here. */
+export const signupLimitOf = (env: AuthEnv) => (Number(env.SIGNUP_LIMIT) > 0 ? Math.floor(Number(env.SIGNUP_LIMIT)) : 0);
+
 export const seatRegistry = (env: AuthEnv) => env.REGISTRY.get(env.REGISTRY.idFromName('seats'));
 
 export const accountStub = (env: AuthEnv, userId: string) => env.WA.get(env.WA.idFromName(userId));
@@ -160,7 +163,7 @@ export async function signInWithLogin(env: AuthEnv, who: { sub: string; key: str
     const dek = await openAccount(who.key, record);
     return dek ? { ok: true, who: { userId, dek } } : fail('The login service gave a different key than this account was made with, so it can\'t be opened.', 403);
   }
-  const limit = Number(env.SIGNUP_LIMIT) > 0 ? Number(env.SIGNUP_LIMIT) : 0;
+  const limit = signupLimitOf(env);
   const registry = seatRegistry(env);
   const seat = await registry.claim(limit);
   if (!seat.ok) return { ok: false, error: `This service is full: it takes ${limit} people for now.`, status: 503, full: true };

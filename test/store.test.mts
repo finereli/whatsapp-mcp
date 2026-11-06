@@ -205,7 +205,9 @@ const allBytes = () => {
   let out = '';
   for (const { name } of db.prepare(`SELECT name FROM sqlite_master WHERE type='table'`).all() as any[]) {
     for (const row of db.prepare(`SELECT * FROM ${name}`).all() as any[]) {
-      for (const v of Object.values(row)) out += (v instanceof Uint8Array ? Buffer.from(v).toString('latin1') + Buffer.from(v).toString('utf8') + Buffer.from(v).toString('hex') : String(v)) + '\n';
+      // blobs as text (latin1 and utf8 catch stored plaintext). Not as hex: a stored "9725" would be 39373235 in
+      // hex, so hex finds nothing real, and random ciphertext or filter bits spell short needles by chance.
+      for (const v of Object.values(row)) out += (v instanceof Uint8Array ? Buffer.from(v).toString('latin1') + Buffer.from(v).toString('utf8') : String(v)) + '\n';
     }
   }
   return out;

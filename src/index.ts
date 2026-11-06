@@ -21,7 +21,7 @@ import { landingPage } from './landing.js';
 import { privacyPage } from './privacy.js';
 import { tosPage } from './tos.js';
 import {
-  accountStub, COOKIE_SECONDS, isSingleUser, mintSession, NOT_SET_UP, seatRegistry, serverMode, PAGE_SECONDS, peekPending, readSession, sessionCookie, SESSION_COOKIE,
+  accountStub, signupLimitOf, COOKIE_SECONDS, isSingleUser, mintSession, NOT_SET_UP, seatRegistry, serverMode, PAGE_SECONDS, peekPending, readSession, sessionCookie, SESSION_COOKIE,
   loginServiceUrl, redeemLoginCode, signIn, signInWithLogin, startSignIn, takePending, unlockedStub,
   type AuthEnv, type Identity,
 } from './auth.js';
@@ -114,7 +114,7 @@ const ownerHandler = {
     const single = isSingleUser(env);
     const hosted = serverMode(env) === 'multi';
     const contact = xHandle(env.CONTACT_X);
-    const signupLimit = Number(env.SIGNUP_LIMIT) > 0 ? Number(env.SIGNUP_LIMIT) : 0;
+    const signupLimit = signupLimitOf(env);
 
     // Someone signed in lands on their dashboard. Everyone else gets the front page.
     if (path === '/') {
@@ -264,6 +264,6 @@ export default {
   async scheduled(_event: ScheduledController, env: Env) {
     if (serverMode(env) !== 'multi') return;
     const registry = seatRegistry(env);
-    console.log(JSON.stringify({ stats: { taken: await registry.count(), limit: Number(env.SIGNUP_LIMIT) || 0, waiting: await registry.waiting() } }));
+    console.log(JSON.stringify({ stats: { taken: await registry.count(), limit: signupLimitOf(env), waiting: await registry.waiting() } }));
   },
 };
