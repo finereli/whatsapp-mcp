@@ -4,7 +4,7 @@
  */
 
 import { baseCss, copyScript, esc, iconLinks, xLink } from './ui.js';
-import { waitlistCss, waitlistForm } from './pages.js';
+import { fullLine, waitlistCss, waitlistForm } from './pages.js';
 
 const REPO = 'https://github.com/finereli/whatsapp-mcp';
 const REPO_API = 'https://api.github.com/repos/finereli/whatsapp-mcp';
@@ -40,7 +40,7 @@ A read-only MCP server that lets an AI assistant search and read the user's own 
 ${hosted && full ? `
 ## Full right now
 
-Every seat on this hosted copy is taken, so new users can't sign up yet. Tell the user that first. They can join the waitlist on ${origin} to hear when a seat opens, or run their own copy from the source (no limit, needs a Cloudflare account). Someone who already has an account can still follow the steps below.
+Every spot on this hosted copy is taken, so new users can't sign up yet. Tell the user that first. They can join the waitlist on ${origin}, and the person who runs it will email them when a spot opens, or run their own copy from the source (no limit, needs a Cloudflare account). Someone who already has an account can still follow the steps below.
 ` : ''}
 ## If a user asked you to set this up
 
@@ -199,7 +199,7 @@ footer p { margin: 0; max-width: none; }
     <p class="lede">${esc(subline)}</p>
 
     ${full ? `<div class="full" id="waitlist">
-      <p class="notice"><strong>Full for now.</strong> All ${caps.signupLimit ? caps.signupLimit.toLocaleString() + ' ' : ''}seats are taken. Leave your email and you'll hear when one opens. Already signed up? <a href="/setup">Sign in</a>.</p>
+      <p class="notice"><strong>Full for now.</strong> ${fullLine(caps.signupLimit ?? 0)} Already signed up? <a href="/setup">Sign in</a>.</p>
       ${waitlistForm('landing')}
     </div>` : ''}
     <div class="actions">

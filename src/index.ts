@@ -102,7 +102,7 @@ async function proceed(env: Env, pendingId: string, who: Identity): Promise<Resp
 /** Tell the operator when signups get close to the cap, and when they hit it. */
 async function milestone(env: Env, taken: number, limit: number) {
   if (!limit) return;
-  if (taken === limit) await notify(env, 'whatsapp-mcp is full', `All ${limit} seats are taken. Signups are closed until someone leaves or you raise SIGNUP_LIMIT.`);
+  if (taken === limit) await notify(env, 'whatsapp-mcp is full', `All ${limit} seats are taken. New people now see the waitlist instead of a signup, until someone leaves or you raise SIGNUP_LIMIT.`);
   else if (limit >= 5 && taken === Math.ceil(limit * 0.8)) await notify(env, 'whatsapp-mcp is filling up', `${taken} of ${limit} seats are taken.`);
 }
 
@@ -136,7 +136,7 @@ const ownerHandler = {
     if (path === '/authorize') {
       const oauth = await env.OAUTH_PROVIDER.parseAuthRequest(request);
       const client = await env.OAUTH_PROVIDER.lookupClient(oauth.clientId);
-      return html(consentPage(client?.clientName ?? 'An app', await startSignIn(env, url.origin, { oauth }), await seatsFull(env, signupLimit)));
+      return html(consentPage(client?.clientName ?? 'An app', await startSignIn(env, url.origin, { oauth }), await seatsFull(env, signupLimit), signupLimit));
     }
     if (path === '/setup') {
       return (await readSession(env, cookieValue(request, SESSION_COOKIE)))
@@ -194,11 +194,7 @@ const ownerHandler = {
       if (path === '/pair/delete' && request.method === 'POST') {
         await wa.destroy();
         if (!single) {
-          // the seat goes back to the pool; tell the operator if someone is waiting for it
-          const registry = seatRegistry(env);
-          noteSeats(await registry.release());
-          const waiting = await registry.waiting();
-          if (waiting) await notify(env, 'whatsapp-mcp has a free seat', `Someone deleted their account. ${waiting} on the waitlist.`);
+          noteSeats(await seatRegistry(env).release()); // the seat goes back to the pool
         }
         // agents that were connected can't reach a store that no longer exists
         for (let cursor: string | undefined; ; ) {
@@ -228,7 +224,6 @@ const ownerHandler = {
       if (email.length > 254 || !EMAIL.test(email)) return html(waitlistErrorPage(contact), 400);
       const source = String(form.get('source') ?? '');
       const r = await seatRegistry(env).join(email, WAITLIST_SOURCES.has(source) ? source : 'landing');
-      if (r.added) await notify(env, 'whatsapp-mcp waitlist', `Someone joined the waitlist. ${r.waiting} waiting.`);
       return html(waitlistDonePage(r.added, contact));
     }
 
@@ -262,4 +257,13 @@ const oauth = new OAuthProvider({
 
 export default {
   fetch: (request: Request, env: Env, ctx: ExecutionContext) => oauth.fetch(request, env, ctx),
+  /**
+   * Once a day, write the seat and waitlist counts to the log, where the operator (or their agent, through
+   * Cloudflare's API) can read them without the PIN. Counts only.
+   */
+  async scheduled(_event: ScheduledController, env: Env) {
+    if (serverMode(env) !== 'multi') return;
+    const registry = seatRegistry(env);
+    console.log(JSON.stringify({ stats: { taken: await registry.count(), limit: Number(env.SIGNUP_LIMIT) || 0, waiting: await registry.waiting() } }));
+  },
 };

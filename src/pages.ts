@@ -5,14 +5,18 @@ export function messagePage(title: string, text: string, status?: { href: string
   return page(title, `<h1>${esc(title)}</h1><p>${esc(text)}</p>${status ? `<a class="button" href="${esc(status.href)}">${esc(status.label)}</a>` : ''}`);
 }
 
-export function consentPage(clientName: string, signInUrl: string, full = false) {
+export function consentPage(clientName: string, signInUrl: string, full = false, limit = 0) {
   return page('Allow access', `
 <h1>Give ${esc(clientName)} read access?</h1>
 <p>It will be able to search and read your WhatsApp messages, and to save names for phone numbers. It can't send anything.</p>
-${full ? `<p class="notice">New signups are closed for now: every seat is taken. If you already have an account, continue. If not, <a href="/#waitlist">join the waitlist</a>.</p>` : ''}
+${full ? `<p class="notice">New signups are closed for now: ${limit ? `all ${limit.toLocaleString()} spots` : 'every spot'} are taken. If you already have an account, continue. If not, <a href="/#waitlist">join the waitlist</a> and I'll email you when a spot opens.</p>` : ''}
 <a class="button" href="${esc(signInUrl)}">Continue</a>
 <p class="muted" style="margin-top:20px"><a href="/privacy">Privacy policy</a> and <a href="/tos">terms of service</a></p>`);
 }
+
+/** Why it's full, in the operator's words. Shared by the front page and the "full" page. */
+export const fullLine = (limit: number) =>
+  `I set this up for ${limit ? `${limit.toLocaleString()} people` : 'a limited number of people'} on my own Cloudflare account, and they're all here. I'm working on making room for more. Leave your email and I'll let you know when a spot opens.`;
 
 /** Scoped to .waitlist, because the front page has its own .field and .hint. */
 export const waitlistCss = `
@@ -25,7 +29,7 @@ export function waitlistForm(source: string, email = '') {
   return `<form method="post" action="/waitlist" class="waitlist">
   <label for="wl-email">Your email</label>
   <input id="wl-email" type="email" name="email" autocomplete="email" required maxlength="254" value="${esc(email)}">
-  <p class="muted wl-hint">Only used to tell you when there is a seat. Nothing else, ever.</p>
+  <p class="muted wl-hint">I'll email you when a spot opens.</p>
   <input type="hidden" name="source" value="${esc(source)}">
   <input type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true" style="position:absolute;left:-9999px">
   <button class="primary" type="submit">Join the waitlist</button>
@@ -36,9 +40,9 @@ export function waitlistForm(source: string, email = '') {
 export function fullPage(limit: number, contact?: string, email = '') {
   return page('Full for now', `
 <h1>Full for now</h1>
-<p>This service takes ${limit ? `${limit.toLocaleString()} people` : 'a limited number of people'} while it is new, and they're all here. Leave your email and you'll hear when a seat opens.</p>
+<p>${fullLine(limit)}</p>
 ${waitlistForm('sign-in', email)}
-<p>${contact ? `Questions: ${xLink(contact)} on X. ` : ''}You can also run your own copy, which has no limit: <a href="https://github.com/finereli/whatsapp-mcp">the setup guide</a> takes a few minutes.</p>
+<p>${contact ? `Questions? I'm ${xLink(contact)} on X. ` : ''}You can also run your own copy, which has no limit. <a href="https://github.com/finereli/whatsapp-mcp">The setup guide</a> takes a few minutes.</p>
 <p class="muted"><a href="/">Back</a></p>`, { css: waitlistCss });
 }
 
@@ -46,14 +50,14 @@ ${waitlistForm('sign-in', email)}
 export function waitlistDonePage(added: boolean, contact?: string) {
   return page('On the list', `
 <h1>${added ? "You're on the list" : "You're already on the list"}</h1>
-<p>You'll get an email when there's a seat for you. ${contact ? `Questions: ${xLink(contact)} on X.` : ''}</p>
+<p>I'll email you when a spot opens. ${contact ? `Questions? I'm ${xLink(contact)} on X.` : ''}</p>
 <p class="muted"><a href="/">Back</a></p>`);
 }
 
 /** A waitlist submission that isn't an email address. */
 export function waitlistErrorPage(contact?: string) {
   return page('Check the email', `
-<h1>That doesn't look like an email</h1>
+<h1>That doesn't look like an email address</h1>
 ${waitlistForm('retry')}
 <p class="muted">${contact ? `Or message ${xLink(contact)} on X. ` : ''}<a href="/">Back</a></p>`, { css: waitlistCss });
 }

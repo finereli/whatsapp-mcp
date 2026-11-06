@@ -33,8 +33,10 @@ export interface AuthEnv {
   LOGIN_URL?: string;
   /** Most accounts the service will have (many-user mode). 0 or unset: no cap. */
   SIGNUP_LIMIT?: string;
-  /** A URL that takes a plain-text POST and pushes it to the operator's phone, such as an ntfy.sh topic. */
-  NOTIFY_URL?: string;
+  /** Email alerts to the operator (see notify.ts). */
+  ALERT_EMAIL?: SendEmail;
+  ALERT_TO?: string;
+  ALERT_FROM?: string;
   /** The operator's X handle, shown where people are told to get in touch. */
   CONTACT_X?: string;
   /** Per-account caps for many-user mode (see limits.ts). 0 means no cap. */

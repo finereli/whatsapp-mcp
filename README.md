@@ -135,7 +135,9 @@ A service for strangers needs limits, so there are three, all optional variables
 - `MAX_MESSAGES` and `MAX_DB_MB`: the most one account can hold. They default to 250,000 messages and 300 MB in many-user mode, and `0` turns one off. A history that's too big when first linked is turned away: the phone is unlinked, everything received is deleted, and the person is told why and where to reach you. An account that grows past the cap later keeps what it has and stops adding new messages.
 - `CONTACT_X`: your X handle, shown on those pages, in the terms and privacy policy, and in what an agent says when an account is full or turned away.
 
-To hear when seats run out, set `NOTIFY_URL` (a secret) to something that takes a plain-text POST and pushes it to your phone. The simplest is [ntfy](https://ntfy.sh): install the app, subscribe to a long random topic, and use `https://ntfy.sh/<that topic>`. You get a push at 80 percent of `SIGNUP_LIMIT` and another when it's full. Messages contain counts and nothing about anyone.
+To hear when seats run out, turn on [Email Routing](https://developers.cloudflare.com/email-routing/) for your domain, verify your address there, and add a `send_email` binding named `ALERT_EMAIL` with that address as `destination_address`, plus the vars `ALERT_TO` (the same address) and `ALERT_FROM` (any address on your domain). You get an email at 80 percent of `SIGNUP_LIMIT` and another when it's full. Messages contain counts and nothing about anyone.
+
+When every seat is taken, the front page says so and offers a waitlist instead of a signup. The list is at `/debug?u=waitlist` (needs the PIN); `POST /debug?u=waitlist&remove=<email>` takes someone off it. With a daily cron trigger, the seat and waitlist counts are written to the log once a day.
 
 What it costs, from Cloudflare's published prices (estimates, not measured on a real fleet):
 
@@ -215,8 +217,8 @@ Don't log a key, put one in a URL, or store one anywhere that outlives a session
 | `src/vault.ts` | Keys: password to account record, sealing and opening, pseudonymous ids, tokens that carry a key. |
 | `src/auth.ts` | Accounts and sessions. Single-user mode or many-user mode, password sign-in and the login service, the KV-backed sessions that carry the key. |
 | `src/limits.ts` | The mode (one person, many, not set up) and the per-account size caps: what is over, and whether to turn an account away or stop adding to it. |
-| `src/registry.ts` | The seat counter behind `SIGNUP_LIMIT`. |
-| `src/notify.ts` | Posts a line of plain text to `NOTIFY_URL`. |
+| `src/registry.ts` | The seat counter behind `SIGNUP_LIMIT`, and the waitlist. |
+| `src/notify.ts` | Emails the operator through the `ALERT_EMAIL` binding. |
 | `src/brand.ts` | The logo as the Worker serves it: the SVG, the PNG icons and the social card, embedded so a deployment needs no static hosting. |
 | `src/phone.ts` | Phone numbers in any format to WhatsApp jids. |
 | `src/whatsapp-do.ts` | The Durable Object. Holds the account record, unlocks with a key, runs Baileys sessions, exposes RPC methods for the Worker. |
@@ -284,7 +286,7 @@ These all cost real time to find. Read them before touching the Baileys parts.
 | `LOGIN_URL` | var, optional | The login service. Defaults to `https://login.finereli.com`. |
 | `SIGNUP_LIMIT` | var, optional | Most accounts in many-user mode. Unset or `0`: no cap. |
 | `MAX_MESSAGES`, `MAX_DB_MB` | var, optional | Most messages and storage in one account. Defaults in many-user mode: 250000 and 300. `0` means no cap. |
-| `NOTIFY_URL` | secret, optional | A URL that takes a plain-text POST, such as an ntfy.sh topic. Used when seats run low and run out. |
+| `ALERT_EMAIL`, `ALERT_TO`, `ALERT_FROM` | send_email binding and vars, optional | Where to email the operator when seats run low and run out. |
 | `CONTACT_X` | var, optional | Your X handle, shown where people are told to get in touch. |
 | `OPERATOR_NAME` | var, optional | Shown on the privacy page and terms as who runs this server. |
 | `TIMEZONE` | var, optional | IANA zone for timestamps in single-user mode. Otherwise each account uses the zone of the browser it signed up from. |

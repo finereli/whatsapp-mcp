@@ -46,7 +46,11 @@
   //   "SIGNUP_LIMIT": "100"          most accounts. Deleting an account frees its seat.
   //   "MAX_MESSAGES": "250000"       most messages in one account (these are the defaults; "0" means no cap)
   //   "MAX_DB_MB": "300"             most storage in one account
-  //   secret NOTIFY_URL              an ntfy.sh topic URL: you get a push when seats are nearly gone and when they are
+  //   Email alerts when seats are nearly gone and when they are. Needs Email Routing on your domain, with your
+  //   address verified there:
+  //     "send_email": [{ "name": "ALERT_EMAIL", "destination_address": "you@example.com" }],
+  //     "vars": { "ALERT_TO": "you@example.com", "ALERT_FROM": "whatsapp-mcp@your-domain.com" }
+  //   Seat and waitlist counts go to the log once a day (needs "triggers": { "crons": ["17 3 * * *"] }).
   //
   // Optional: "vars": { "TIMEZONE": "Europe/Lisbon", "OPERATOR_NAME": "Your name", "CONTACT_X": "yourhandle", "DEFAULT_COUNTRY_CODE": "351" }
 }
