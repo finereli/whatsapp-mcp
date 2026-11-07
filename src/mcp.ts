@@ -43,6 +43,7 @@ function buildServer(wa: DurableObjectStub<WhatsAppStore>, env: Env, origin: str
         `Access to the user's WhatsApp history. It can read and search messages and save names for phone numbers; it cannot send anything. Timestamps are ${TZ}. ` +
         `Each read first pulls anything new from WhatsApp if the store is more than a few minutes old. ` +
         `Use list_chats to find a chat, get_messages to read it, search_messages to find things across chats. ${NAME_HINT}`,
+      maxToolInputElements: 10_000,
     },
   );
 
