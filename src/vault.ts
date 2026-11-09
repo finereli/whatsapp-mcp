@@ -55,9 +55,23 @@ export interface AccountRecord {
   created: number;
 }
 
+/**
+ * Deployed Workers refuse PBKDF2 above 100,000 iterations (local `wrangler dev` doesn't, so only production
+ * shows it). Larger counts run as consecutive passes of at most this many, each pass's output keying the next.
+ * An attacker still pays every round, in sequence. Counts at or under the cap are plain PBKDF2, as before.
+ */
+export const PBKDF2_PASS = 100_000;
+
+async function pbkdf2(secret: Uint8Array, salt: Buffer, iterations: number): Promise<Buffer> {
+  const base = await crypto.subtle.importKey('raw', secret, 'PBKDF2', false, ['deriveBits']);
+  return Buffer.from(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, base, 256));
+}
+
 async function stretch(password: string, salt: Buffer, iterations: number) {
-  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(password.normalize('NFKC')), 'PBKDF2', false, ['deriveBits']);
-  const master = Buffer.from(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, base, 256));
+  let master = await pbkdf2(new TextEncoder().encode(password.normalize('NFKC')), salt, Math.min(iterations, PBKDF2_PASS));
+  for (let done = PBKDF2_PASS; done < iterations; done += PBKDF2_PASS) {
+    master = await pbkdf2(master, salt, Math.min(iterations - done, PBKDF2_PASS));
+  }
   // Two independent keys from one stretch: one wraps the DEK, one proves the password.
   return { kek: hmac(master, 'kek'), auth: hmac(master, 'auth') };
 }

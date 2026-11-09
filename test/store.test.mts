@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { initSchema, isLegacy, matches, migrateLegacy, parseQuery, Store } from '../src/store.ts';
 import { sqliteAuthState } from '../src/auth-state.ts';
 import { limitsOf, verdict } from '../src/limits.ts';
-import { createAccount, KEY_STRETCH, newToken, openAccount, rewrap, tokenId, unwrapForToken, Vault, wrapForToken } from '../src/vault.ts';
+import { createAccount, KDF_ITERATIONS, KEY_STRETCH, newToken, PBKDF2_PASS, openAccount, rewrap, tokenId, unwrapForToken, Vault, wrapForToken } from '../src/vault.ts';
 
 // ---------- a SqlStorage lookalike ----------
 
@@ -38,6 +38,22 @@ const moved = await rewrap('correct horse battery', 'a brand new password', acct
 check('changing the password keeps the same key', (await openAccount('a brand new password', moved!))?.equals(acct.dek) === true);
 check('and the old password stops working', (await openAccount('correct horse battery', moved!)) === null);
 check('changing needs the old password', (await rewrap('nope nope nope', 'x', acct.record)) === null);
+
+// the real count, under deployed Workers' cap of 100,000 iterations per PBKDF2 call (issue #3)
+{
+  const real = crypto.subtle.deriveBits.bind(crypto.subtle);
+  let calls = 0, over = 0;
+  (crypto.subtle as any).deriveBits = (alg: any, ...rest: any[]) => {
+    calls++;
+    if (alg.iterations > PBKDF2_PASS) { over++; return Promise.reject(new Error(`iteration counts above 100000 are not supported (requested ${alg.iterations})`)); }
+    return real(alg, ...rest);
+  };
+  const full = await createAccount('correct horse battery');
+  (crypto.subtle as any).deriveBits = real;
+  check('the default count runs in passes under the Workers cap', over === 0 && calls === Math.ceil(KDF_ITERATIONS / PBKDF2_PASS), { calls, over });
+  check('and the result opens the account', (await openAccount('correct horse battery', full.record))?.equals(full.dek) === true);
+  check('a partial last pass still opens', (await openAccount('x', (await createAccount('x', PBKDF2_PASS + 7)).record)) !== null);
+}
 
 // a key from the login service: already random, so it isn't stretched, and the same key opens the same account
 const loginKey = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
