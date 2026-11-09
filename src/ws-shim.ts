@@ -3,6 +3,10 @@
  * small slice of it: construct with { origin, headers }, on/once/off, send, close,
  * readyState. Workers can't set Origin via `new WebSocket`, but fetch() with an
  * Upgrade header can, and WhatsApp's server checks it.
+ *
+ * close() emits 'close' itself, once: Baileys awaits that event before it
+ * reconnects, and under local workerd (wrangler dev, Docker) a peer that drops
+ * TLS, as WhatsApp does after the 515 that follows pairing, never fires it.
  */
 import { EventEmitter } from 'node:events';
 
@@ -13,6 +17,14 @@ export default class WebSocket extends EventEmitter {
   static CLOSED = 3;
   readyState = 0;
   private ws: globalThis.WebSocket | null = null;
+  private closeEmitted = false;
+
+  private emitClose(code: number) {
+    if (this.closeEmitted) return;
+    this.closeEmitted = true;
+    this.readyState = 3;
+    this.emit('close', code, Buffer.alloc(0));
+  }
 
   constructor(url: string | URL, opts: { origin?: string; headers?: Record<string, string> } = {}) {
     super();
@@ -28,18 +40,14 @@ export default class WebSocket extends EventEmitter {
           const d = e.data as string | ArrayBuffer;
           this.emit('message', typeof d === 'string' ? Buffer.from(d) : Buffer.from(d), typeof d === 'string');
         });
-        ws.addEventListener('close', () => {
-          this.readyState = 3;
-          this.emit('close', 1000, Buffer.alloc(0));
-        });
+        ws.addEventListener('close', () => this.emitClose(1000));
         ws.addEventListener('error', () => this.emit('error', new Error('websocket error')));
         this.readyState = 1;
         this.emit('open');
       })
       .catch((err) => {
-        this.readyState = 3;
         this.emit('error', err);
-        this.emit('close', 1006, Buffer.alloc(0));
+        this.emitClose(1006);
       });
   }
 
@@ -57,10 +65,7 @@ export default class WebSocket extends EventEmitter {
     try {
       this.ws?.close(1000);
     } catch {}
-    if (!this.ws) {
-      this.readyState = 3;
-      this.emit('close', 1000, Buffer.alloc(0));
-    }
+    this.emitClose(1000);
   }
 
   terminate() {

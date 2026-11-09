@@ -92,6 +92,24 @@ Wrangler prints your URL, something like `https://whatsapp-mcp.your-name.workers
 
 The first sign-in with `OWNER_PASSWORD` creates your account. After that your account's own password is what counts, so changing the secret later does nothing. If you want your own domain, see the comments at the bottom of `wrangler.jsonc`.
 
+### Run it with Docker
+
+The same Worker runs on your own machine under workerd, Cloudflare's open source runtime, through `wrangler dev`. Durable Objects and KV become SQLite files in `./data`, and there is no CPU limit, so a big first import isn't a problem. You need Docker and a way to reach it over https: a Cloudflare Tunnel, Caddy, Traefik, anything that terminates TLS.
+
+```sh
+git clone https://github.com/finereli/whatsapp-mcp
+cd whatsapp-mcp
+cp .env.example .env    # set PUBLIC_HOST and OWNER_PASSWORD
+docker compose up -d --build
+```
+
+Point your tunnel or proxy at the published port (`127.0.0.1:8787` by default; `BIND` and `PORT` in `.env` change it) for `PUBLIC_HOST`, then carry on from step 1 above with `https://PUBLIC_HOST`. The Worker builds every URL it hands out, OAuth ones included, from `PUBLIC_HOST`, so it has to be the name clients use.
+
+Things that differ from Cloudflare:
+- `./data` is everything: messages, the WhatsApp session, agents' tokens. Back it up together with `.env`; without the password the backup can't be read, and without the backup there is nothing to read.
+- `wrangler dev` is a development server. It holds up fine for one person, but there is no fleet behind it: if the machine is down, so is your agent's WhatsApp.
+- Set `PIN` in `.env` to use `/debug` (`curl -H "x-pin: $PIN" http://127.0.0.1:8787/debug`), which shows the pairing log when a link fails.
+
 ### The Workers Paid note
 
 Importing a large history decodes a lot of data in one go, and the default CPU limit on Workers is too small for it. `wrangler.jsonc` raises it, and raising it needs the paid plan, which is $5 a month. I haven't tried the free plan. If you're on it, remove the `limits` block and expect the first import to be fragile.
@@ -233,6 +251,7 @@ Don't log a key, put one in a URL, or store one anywhere that outlives a session
 | `src/ws-shim.ts`, `src/lru-shim.ts`, `src/polyfills.ts` | Make Baileys run on workerd. See below. |
 | `scripts/vendor-bridge.mjs` | Extracts the wasm from Baileys' Rust bridge. Runs on `npm install`. |
 | `scripts/pull-config.mjs` | Rebuilds `wrangler.local.jsonc` from the live Worker. |
+| `Dockerfile`, `compose.yml`, `docker/entrypoint.sh` | Running it under `wrangler dev` on your own machine. |
 | `local-export/` | A separate one-off script that dumps your history to JSON files with no server. Not part of the deployment. |
 
 ## How sessions work

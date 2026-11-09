@@ -15,3 +15,5 @@ wrangler.*.local.jsonc
 # one-off local exports contain your private messages and a live WhatsApp session
 local-export/auth/
 local-export/exports/
+data/
+.env
