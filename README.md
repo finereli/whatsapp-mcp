@@ -1,5 +1,7 @@
 # whatsapp-mcp
 
+<a href="https://news.ycombinator.com/item?id=50145715"><img src="https://hackergit.org/badge/finereli/whatsapp-mcp.svg" alt="Hacker News" height="20"></a>
+
 Connect ChatGPT, Claude or Grok to your WhatsApp. It is a read-only MCP server over your own message history, stored encrypted, and open source.
 
 You link your phone once, the way you'd link WhatsApp Web, and from then on any MCP client can search and read your chats. It can't send anything.
