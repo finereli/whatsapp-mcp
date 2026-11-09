@@ -15,9 +15,20 @@ import { SearchIndex, fold, needsOf, words } from './search-index.js';
 // What each kind of blob is bound to, so one can't be swapped for another.
 const MSG = 'm', CHAT = 'c', CONTACT = 'k', NAME = 'n', ALIAS = 'l';
 
-interface MsgBlob { b: string; p?: string; s?: string }                         // body, push name, sender jid
+interface MsgBlob { b: string; p?: string; s?: string; m?: MediaRef; t?: string } // body, push name, sender jid, media, transcript
 interface ChatRec { jid: string; name?: string | null; group: 0 | 1; push?: string; pushTs?: number }
 interface ContactRec { jid: string; name?: string | null; notify?: string | null }
+
+export type MediaKind = 'image' | 'video' | 'audio' | 'document' | 'sticker';
+/**
+ * What it takes to fetch a message's file later: where it is on WhatsApp's CDN and the key it is encrypted with,
+ * plus the message key, which asking the phone to upload it again needs once the CDN copy has expired. Kept inside
+ * the sealed message blob like everything else. The file itself is never stored.
+ */
+export interface MediaRef {
+  k: MediaKind; key: string; path?: string; url?: string; mime?: string; len?: number; name?: string;
+  rk: { remoteJid: string; fromMe: boolean; participant?: string };
+}
 
 const TABLES = ['messages', 'chats', 'contacts', 'custom_names', 'alias', 'auth'] as const;
 
@@ -203,8 +214,22 @@ const real = (x?: string | null) => (isPlaceholder(x) ? null : (x as string));
 const num = (v: unknown) => Number((v as { toNumber?: () => number })?.toNumber?.() ?? v ?? 0);
 const numberLabel = (jid: string) => (jid.endsWith('@s.whatsapp.net') ? `+${jid.replace('@s.whatsapp.net', '')}` : jid);
 
+type MediaContent = { mediaKey?: Uint8Array | string | null; directPath?: string | null; url?: string | null; mimetype?: string | null; fileLength?: unknown; fileName?: string | null };
+/** The download details of a media message, or nothing if WhatsApp didn't send enough to fetch it. */
+function mediaOf(k: MediaKind, c?: MediaContent | null): Omit<MediaRef, 'rk'> | undefined {
+  const key = typeof c?.mediaKey === 'string' ? c.mediaKey : c?.mediaKey?.length ? Buffer.from(c.mediaKey).toString('base64') : undefined;
+  if (!c || !key || !(c.directPath || c.url)) return undefined;
+  const ref: Omit<MediaRef, 'rk'> = { k, key };
+  if (c.directPath) ref.path = c.directPath;
+  if (c.url) ref.url = c.url;
+  if (c.mimetype) ref.mime = c.mimetype;
+  if (num(c.fileLength)) ref.len = num(c.fileLength);
+  if (c.fileName) ref.name = c.fileName;
+  return ref;
+}
+
 /** What a message says, in text. Media becomes a short label so search and reading still make sense. */
-export function describe(msg: proto.IWebMessageInfo): { type: string; body: string } | null {
+export function describe(msg: proto.IWebMessageInfo): { type: string; body: string; media?: Omit<MediaRef, 'rk'> } | null {
   const m = normalizeMessageContent(msg.message);
   if (!m) return null;
   const type = getContentType(m);
@@ -216,19 +241,19 @@ export function describe(msg: proto.IWebMessageInfo): { type: string; body: stri
     case 'extendedTextMessage':
       return { type: 'text', body: m.extendedTextMessage?.text ?? '' };
     case 'imageMessage':
-      return { type: 'image', body: `[image]${cap(m.imageMessage?.caption)}` };
+      return { type: 'image', body: `[image]${cap(m.imageMessage?.caption)}`, media: mediaOf('image', m.imageMessage) };
     case 'videoMessage':
-      return { type: 'video', body: `[video]${cap(m.videoMessage?.caption)}` };
+      return { type: 'video', body: `[video]${cap(m.videoMessage?.caption)}`, media: mediaOf('video', m.videoMessage) };
     case 'audioMessage': {
       const s = num(m.audioMessage?.seconds);
-      return { type: 'audio', body: `[${m.audioMessage?.ptt ? 'voice note' : 'audio'}${s ? ` ${s}s` : ''}]` };
+      return { type: 'audio', body: `[${m.audioMessage?.ptt ? 'voice note' : 'audio'}${s ? ` ${s}s` : ''}]`, media: mediaOf('audio', m.audioMessage) };
     }
     case 'documentMessage':
-      return { type: 'document', body: `[document: ${m.documentMessage?.fileName ?? 'file'}]${cap(m.documentMessage?.caption)}` };
+      return { type: 'document', body: `[document: ${m.documentMessage?.fileName ?? 'file'}]${cap(m.documentMessage?.caption)}`, media: mediaOf('document', m.documentMessage) };
     case 'documentWithCaptionMessage':
       return { type: 'document', body: `[document]` };
     case 'stickerMessage':
-      return { type: 'sticker', body: '[sticker]' };
+      return { type: 'sticker', body: '[sticker]', media: mediaOf('sticker', m.stickerMessage) };
     case 'locationMessage':
     case 'liveLocationMessage':
       return { type: 'location', body: `[location${m.locationMessage?.name ? `: ${m.locationMessage.name}` : ''}]` };
@@ -281,7 +306,9 @@ export function matches(text: string, terms: Term[]): boolean {
   return terms.every((t) => hasTerm(have, t));
 }
 
-export interface SearchHit { id: string; chat: string; chat_name: string; ts: number; sender: string; body: string }
+const transcriptSuffix = (t: string) => ` transcript: ${t}`;
+
+export interface SearchHit { id: string; chat: string; chat_name: string; ts: number; sender: string; body: string; media: boolean }
 
 // ---------- the store ----------
 
@@ -479,12 +506,17 @@ export class Store {
         const cid = this.pj(chat);
         const sender = senderJid === 'me' ? 'me' : senderJid ? this.pj(senderJid) : null;
         const ts = num(msg.messageTimestamp);
+        const media: MediaRef | undefined = d.media && {
+          ...d.media,
+          rk: { remoteJid: key.remoteJid, fromMe: !!key.fromMe, ...(key.participant ? { participant: key.participant } : {}) },
+        };
 
         const existing = this.sql.exec<{ sender: string | null; data: ArrayBuffer }>(`SELECT sender, data FROM messages WHERE chat = ? AND id = ?`, cid, key.id).toArray()[0];
         if (!existing) {
           const blob: MsgBlob = { b: d.body };
           if (msg.pushName) blob.p = msg.pushName;
           if (senderJid && senderJid !== 'me') blob.s = senderJid;
+          if (media) blob.m = media;
           this.sql.exec(
             `INSERT INTO messages (id, chat, ts, from_me, sender, type, data) VALUES (?,?,?,?,?,?,?)`,
             key.id, cid, ts, key.fromMe ? 1 : 0, sender, d.type, this.vault.seal(blob, MSG),
@@ -492,13 +524,16 @@ export class Store {
           this.noteLid(senderJid, sender);
           this.index.add(cid, ts, d.body);
           added++;
-        } else if (existing.sender == null || msg.pushName) {
-          // a repeat delivery can still fill in who sent it, or their push name
+        } else if (existing.sender == null || msg.pushName || media) {
+          // a repeat delivery can still fill in who sent it, their push name, or (for a message stored before media
+          // was kept) how to download its file
           const blob = this.vault.open<MsgBlob>(existing.data, MSG);
           const fillPush = !blob.p && msg.pushName;
           const fillSender = existing.sender == null && sender;
-          if (fillPush || fillSender) {
+          const fillMedia = !blob.m && media;
+          if (fillPush || fillSender || fillMedia) {
             if (fillPush) blob.p = msg.pushName!;
+            if (fillMedia) blob.m = media;
             if (fillSender && senderJid && senderJid !== 'me') blob.s = senderJid;
             this.sql.exec(`UPDATE messages SET sender = COALESCE(sender, ?), data = ? WHERE chat = ? AND id = ?`, sender, this.vault.seal(blob, MSG), cid, key.id);
             if (fillSender) this.noteLid(senderJid, sender);
@@ -662,7 +697,7 @@ export class Store {
       .toArray()
       .map((r) => {
         const blob = this.vault.open<MsgBlob>(r.data, MSG);
-        return { id: r.id, ts: r.ts, sender: this.senderLabel(r, blob, s), type: r.type, body: blob.b };
+        return { id: r.id, ts: r.ts, sender: this.senderLabel(r, blob, s), type: r.type, body: blob.b, media: Boolean(blob.m) };
       });
     return order === 'DESC' ? rows.reverse() : rows;
   }
@@ -708,7 +743,7 @@ export class Store {
         for (const w of here) {
           if (!matches(blob.b, w.terms)) continue;
           const jid = jidOf.get(row.chat) ?? row.chat;
-          w.hits.push({ id: row.id, chat: jid, chat_name: this.nameOf(jid, s).name, ts: row.ts, sender: this.senderLabel(row, blob, s), body: blob.b });
+          w.hits.push({ id: row.id, chat: jid, chat_name: this.nameOf(jid, s).name, ts: row.ts, sender: this.senderLabel(row, blob, s), body: blob.b, media: Boolean(blob.m) });
         }
       }
       for (const w of here) { w.hits.sort(byTs); w.hits.length = Math.min(w.hits.length, opts.limit); }
@@ -716,4 +751,68 @@ export class Store {
     return { hits: wants.map((w) => w.hits), scanned };
   }
 
+  /**
+   * One-to-one chats where the other person wrote last: nothing from me after their latest message. A reaction
+   * of mine counts as an answer; one of theirs doesn't count as a new message. Groups, channels and broadcasts are
+   * left out. Starts from chat_stats, so only chats active since `since` are read, and only their newest rows.
+   */
+  unanswered(opts: { since: number; limit: number }) {
+    const s = this.snapshot();
+    const LOOK = 20; // rows read per chat; more waiting than this shows as "20+"
+    const out: { jid: string; name: string; waiting: number; more: boolean; since: number; last_ts: number; last: string }[] = [];
+    for (const [cid, st] of this.chatStats()) {
+      if (st.last < opts.since) continue;
+      const rec = s.chats.get(cid);
+      if (!rec || rec.group || !/@(s\.whatsapp\.net|lid)$/.test(rec.jid)) continue;
+      const rows = this.sql.exec<{ ts: number; from_me: number; data: ArrayBuffer }>(
+        `SELECT ts, from_me, data FROM messages WHERE chat = ? AND (from_me = 1 OR type != 'reaction') ORDER BY ts DESC LIMIT ?`, cid, LOOK,
+      ).toArray();
+      const mine = rows.findIndex((r) => r.from_me);
+      const theirs = mine < 0 ? rows : rows.slice(0, mine);
+      if (!theirs.length) continue;
+      out.push({
+        jid: rec.jid, name: this.nameOf(rec.jid, s).name,
+        waiting: theirs.length, more: mine < 0 && rows.length === LOOK,
+        since: theirs[theirs.length - 1].ts, last_ts: theirs[0].ts, last: this.vault.open<MsgBlob>(theirs[0].data, MSG).b,
+      });
+    }
+    return out.sort((a, b) => b.last_ts - a.last_ts).slice(0, opts.limit);
+  }
+
+  private blobOf(chat: string, id: string): { cid: string; ts: number; blob: MsgBlob } | null {
+    const cid = this.pj(chat);
+    const r = this.sql.exec<{ ts: number; data: ArrayBuffer }>(`SELECT ts, data FROM messages WHERE chat = ? AND id = ?`, cid, id).toArray()[0];
+    return r ? { cid, ts: r.ts, blob: this.vault.open<MsgBlob>(r.data, MSG) } : null;
+  }
+  private putBlob(cid: string, id: string, blob: MsgBlob) {
+    this.sql.exec(`UPDATE messages SET data = ? WHERE chat = ? AND id = ?`, this.vault.seal(blob, MSG), cid, id);
+  }
+
+  /** How to download a message's file: null if there is no such message, `{}` if it has no file we can fetch. */
+  media(chat: string, id: string): { ref?: MediaRef; transcript?: string } | null {
+    const m = this.blobOf(chat, id);
+    return m ? { ref: m.blob.m, transcript: m.blob.t } : null;
+  }
+
+  /** Where the phone re-uploaded a file to, after WhatsApp's copy expired. */
+  setMediaLocation(chat: string, id: string, loc: { path?: string; url?: string }) {
+    const m = this.blobOf(chat, id);
+    if (!m?.blob.m) return;
+    m.blob.m = { ...m.blob.m, ...loc };
+    this.putBlob(m.cid, id, m.blob);
+  }
+
+  /** Keep a voice note's transcript with it, in its text too, so reading and search see what was said. */
+  setTranscript(chat: string, id: string, transcript: string) {
+    const m = this.blobOf(chat, id);
+    if (!m) return;
+    const label = m.blob.t ? m.blob.b.slice(0, m.blob.b.length - transcriptSuffix(m.blob.t).length) : m.blob.b;
+    m.blob.t = transcript;
+    m.blob.b = label + transcriptSuffix(transcript);
+    this.tx(() => {
+      this.putBlob(m.cid, id, m.blob);
+      this.index.add(m.cid, m.ts, transcript);
+      this.index.flush();
+    });
+  }
 }

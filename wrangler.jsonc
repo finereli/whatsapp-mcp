@@ -52,5 +52,9 @@
   //     "vars": { "ALERT_TO": "you@example.com", "ALERT_FROM": "whatsapp-mcp@your-domain.com" }
   //   Seat and waitlist counts go to the log once a day (needs "triggers": { "crons": ["17 3 * * *"] }).
   //
+  // Optional: voice note transcription (the transcribe_audio tool) with Workers AI, billed to your account:
+  //   "ai": { "binding": "AI" },
+  //   The default model is Whisper large-v3-turbo. Another one: "vars": { "TRANSCRIBE_MODEL": "@cf/openai/whisper" }
+  //
   // Optional: "vars": { "TIMEZONE": "Europe/Lisbon", "OPERATOR_NAME": "Your name", "CONTACT_X": "yourhandle", "DEFAULT_COUNTRY_CODE": "351" }
 }

@@ -18,6 +18,9 @@ import type { WASocket } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-generator';
 import { sqliteAuthState } from './auth-state.js';
 import { Store, hasSchema, initSchema, isLeftover, isLegacy, migrateLegacy } from './store.js';
+import type { MediaKind, MediaRef } from './store.js';
+import { downloadMedia } from './media.js';
+import { MAX_AUDIO_BYTES, transcribe } from './transcribe.js';
 import { Vault } from './vault.js';
 import { limitsOf, verdict } from './limits.js';
 import { contactText, xHandle } from './ui.js';
@@ -30,6 +33,9 @@ export interface SessionResult { reason: string; added: number; ms: number }
 const PAIR_MAX_MS = 10 * 60_000;
 const PAIR_ABANDON_MS = 3 * 60_000;
 const PULL_MAX_MS = 60_000;
+const REUPLOAD_WAIT_MS = 30_000;
+/** Largest file get_media hands back. Bigger ones would swamp an agent's context anyway. */
+export const MEDIA_MAX_BYTES = 10 * 1024 * 1024;
 
 const show = (x: unknown): string =>
   x instanceof Error ? `${x.name}: ${x.message}` : typeof x === 'string' ? x : JSON.stringify(x, (_k, v) => (v instanceof Error ? `${v.name}: ${v.message}` : v));
@@ -101,6 +107,8 @@ export class WhatsAppStore extends DurableObject<Env> {
 
   /** Slow down password guessing: five wrong passwords in a row, then longer and longer waits. */
   noteLogin(ok: boolean) {
+    // a wrong password before there is an account: no tables yet (see the constructor), and nothing to lock
+    if (!hasSchema(this.ctx.storage.sql)) return;
     if (ok) { this.setMeta('fails', '0'); this.setMeta('locked_until', '0'); return; }
     const fails = Number(this.meta('fails') ?? 0) + 1;
     this.setMeta('fails', String(fails));
@@ -140,7 +148,11 @@ export class WhatsAppStore extends DurableObject<Env> {
     } else {
       this.setMeta('canary', b64(vault.seal('ok', 'canary')));
     }
-    const auth = sqliteAuthState(sql, vault, (paired) => this.setMeta('paired', paired ? '1' : '0'));
+    // told on every unlock and every creds save; only a change is worth a write
+    const auth = sqliteAuthState(sql, vault, (paired) => {
+      const v = paired ? '1' : '0';
+      if (this.meta('paired') !== v) this.setMeta('paired', v);
+    });
     this.unlocked = { dek, vault, auth, store: new Store(sql, tx, vault) };
   }
 
@@ -311,11 +323,114 @@ export class WhatsAppStore extends DurableObject<Env> {
   search(o: Parameters<Store['search']>[0]) { return this.store.search(o); }
   counts() { return this.store.counts(); }
   unnamedChats(limit: number) { return this.store.unnamedChats(limit); }
+  unanswered(o: Parameters<Store['unanswered']>[0]) { return this.store.unanswered(o); }
   setNames(rows: { jid: string; name: string }[]) { return this.store.setCustomNames(rows); }
+
+  // ---------- media ----------
+
+  /**
+   * Download one message's file. WhatsApp keeps a file on its servers for a few weeks; after that the phone is
+   * asked to upload it again, which needs the phone online and still holding it. The bytes are returned, never kept.
+   */
+  async fetchMedia(chat: string, id: string): Promise<
+    { ok: true; kind: MediaKind; mime: string; name?: string; data: string; size: number; reuploaded: boolean } | { ok: false; error: string }
+  > {
+    const got = await this.mediaBytes(chat, id);
+    if (!got.ok) return got;
+    const { ref, bytes, reuploaded } = got;
+    return {
+      ok: true, kind: ref.k, mime: ref.mime ?? 'application/octet-stream', ...(ref.name ? { name: ref.name } : {}),
+      data: Buffer.from(bytes).toString('base64'), size: bytes.length, reuploaded,
+    };
+  }
+
+  private async mediaBytes(chat: string, id: string, maxBytes = MEDIA_MAX_BYTES): Promise<{ ok: true; ref: MediaRef; bytes: Uint8Array; reuploaded: boolean } | { ok: false; error: string }> {
+    const m = this.store.media(chat, id);
+    if (!m) return { ok: false, error: 'there is no message with that id in that chat' };
+    const ref = m.ref;
+    if (!ref) return { ok: false, error: 'that message has no file this server can fetch. Files from before this server kept download keys come back after a relink (stored messages are kept)' };
+    let got = await downloadMedia(ref, maxBytes);
+    if (got.ok) return { ok: true, ref, bytes: got.bytes, reuploaded: false };
+    if (!got.expired) return { ok: false, error: got.error };
+    const why = got.error;
+    try {
+      const loc = await this.reupload(id, ref);
+      this.store.setMediaLocation(chat, id, loc);
+      got = await downloadMedia({ ...ref, ...loc }, maxBytes);
+    } catch (e: any) {
+      this.note(`media re-upload: ${e?.message}`);
+      return { ok: false, error: `${why}, and asking the phone to upload it again failed (${e?.message}). The phone has to be online and still have the file` };
+    }
+    return got.ok ? { ok: true, ref, bytes: got.bytes, reuploaded: true } : { ok: false, error: got.error };
+  }
+
+  /**
+   * Voice notes to text, kept with each message so a note is transcribed once and search finds its words after.
+   * One result per id, in order.
+   */
+  async transcribeAudio(chat: string, ids: string[]): Promise<{ id: string; ok: boolean; text: string }[]> {
+    const ai = this.env.AI;
+    if (!ai) return ids.map((id) => ({ id, ok: false, text: 'transcription is not set up on this server' }));
+    const one = async (id: string): Promise<{ id: string; ok: boolean; text: string }> => {
+      const m = this.store.media(chat, id);
+      if (m?.transcript) return { id, ok: true, text: m.transcript };
+      if (m?.ref && m.ref.k !== 'audio') return { id, ok: false, text: `that is ${m.ref.k === 'image' ? 'an' : 'a'} ${m.ref.k}, not a voice note` };
+      const got = await this.mediaBytes(chat, id, MAX_AUDIO_BYTES);
+      if (!got.ok) return { id, ok: false, text: got.error };
+      try {
+        const text = (await transcribe(ai, got.bytes, { mime: got.ref.mime, model: this.env.TRANSCRIBE_MODEL })) || '[no speech]';
+        this.store.setTranscript(chat, id, text);
+        return { id, ok: true, text };
+      } catch (e: any) {
+        this.note(`transcribe: ${e?.message}`.slice(0, 300));
+        return { id, ok: false, text: `transcription failed (${e?.message ?? 'unknown error'})` };
+      }
+    };
+    // a note takes a few seconds, so four at a time keeps a full batch inside an agent's patience
+    const out: { id: string; ok: boolean; text: string }[] = new Array(ids.length);
+    let next = 0;
+    const worker = async () => { for (let i = next++; i < ids.length; i = next++) out[i] = await one(ids[i]); };
+    await Promise.all(Array.from({ length: Math.min(4, ids.length) }, worker));
+    return out;
+  }
+
+  /** Ask the phone to put an expired file back on WhatsApp's servers. */
+  private async reupload(id: string, ref: MediaRef): Promise<{ path?: string; url?: string }> {
+    const field = `${ref.k}Message`;
+    const content = { mediaKey: Buffer.from(ref.key, 'base64'), directPath: ref.path, url: ref.url, mimetype: ref.mime };
+    const message = { key: { ...ref.rk, id }, message: { [field]: content } };
+    return this.withSocket(async (sock) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('the phone did not answer')), REUPLOAD_WAIT_MS); });
+      try {
+        const updated: any = await Promise.race([sock.updateMediaMessage(message as any), timeout]);
+        const c = updated?.message?.[field] ?? content;
+        return { path: c.directPath ?? undefined, url: c.url ?? undefined };
+      } finally {
+        clearTimeout(timer);
+      }
+    });
+  }
+
+  /** Run fn on an open socket, starting a pull if none is running, and keeping the session from ending meanwhile. */
+  private async withSocket<T>(fn: (sock: WASocket) => Promise<T>): Promise<T> {
+    if (!this.auth.isPaired()) throw new Error('WhatsApp is not linked');
+    this.holds++;
+    try {
+      if (!this.session) void this.pull().catch(() => {});
+      for (let i = 0; i < 80 && !(this.sock && this.phase === 'syncing'); i++) await new Promise((r) => setTimeout(r, 250));
+      if (!this.sock || this.phase !== 'syncing') throw new Error('could not connect to WhatsApp');
+      return await fn(this.sock);
+    } finally {
+      this.holds--;
+    }
+  }
 
   // ---------- the session ----------
 
   private sock: WASocket | null = null;
+  /** Callers waiting on the open socket (a media re-upload). A session doesn't end for being idle while any wait. */
+  private holds = 0;
 
   private runSession(opts: { pairing: boolean; maxMs: number; idleMs: number }): Promise<SessionResult> {
     const started = Date.now();
@@ -443,6 +558,7 @@ export class WhatsAppStore extends DurableObject<Env> {
         const paired = this.auth.isPaired();
         if (opts.pairing && !paired && now - this.lastPoll > PAIR_ABANDON_MS) return void finish('abandoned');
         if (!paired) return; // waiting on a scan
+        if (this.holds) return;
         // a first link waits for WhatsApp's own "100%"; a plain pull just waits for quiet
         const historyDone = !opts.pairing || this.historyProgress === 100;
         if (backlogDelivered && historyDone && now - lastActivity > opts.idleMs) void finish('idle');

@@ -130,7 +130,9 @@ The first version stored messages in plain text. The first sign-in after you dep
 
 **Some chats show up as phone numbers.** WhatsApp doesn't give a linked device every contact name, and most of these are one-off messages from people you never saved. For the ones that matter, your agent can fix it: it lists the unnamed chats, looks the numbers up in your contacts with whatever contacts tool it already has (a Google Contacts or Gmail connector, for example), and saves the names. The server never connects to a contacts service itself. See "Naming chats" below.
 
-**Media isn't downloaded.** Photos, voice notes and documents appear as labels like `[image]` or `[voice note 12s]`, with the caption if there was one. Nothing is transcribed.
+**Media is fetched when asked for.** Photos, voice notes and documents appear as labels like `[image]` or `[voice note 12s]`, with the caption if there was one and a media id. `get_media` fetches the file from WhatsApp and hands it to the agent; nothing is stored but what it takes to fetch it again. WhatsApp keeps files for a few weeks, and after that the phone is asked to upload the file again, which works while it's online and still has it. Messages stored before this was added have no download details until you relink.
+
+**Voice notes can be transcribed.** With a Workers AI binding (`"ai": { "binding": "AI" }` in `wrangler.jsonc`), `transcribe_audio` runs voice notes through Whisper on Cloudflare. A transcript is kept with its message, so `get_messages` shows it and `search_messages` finds its words. It costs about $0.0005 a minute of audio, billed to your Cloudflare account. Under Docker the binding still calls Cloudflare, so it needs `wrangler login`; without it, leave transcription off.
 
 **Reactions show up as replies.** A 🙏 on a message appears in the chat at the time it was sent, as `[reacted 🙏 to "the message"]`, from whoever sent it. Changing a reaction replaces it, and taking it back removes it. Reactions from before this was added were never stored, so they only appear for older messages if you relink and re-import.
 
@@ -180,6 +182,9 @@ The risk to weigh: every linked device connects from Cloudflare's datacenter add
 | `list_chats` | Chats, most recent first. Filter by name or number. |
 | `get_messages` | Read one chat. Page back or forward by date. |
 | `search_messages` | Search across everything, or within one chat. Takes a list of queries and answers them in one pass. |
+| `unanswered_chats` | Direct chats where the other person wrote last and you haven't replied. |
+| `get_media` | Fetch the photo, voice note, video or document behind a message. |
+| `transcribe_audio` | Voice notes to text, kept with the message. Only with a Workers AI binding. |
 | `unnamed_chats` | Chats known only by phone number, busiest first, with the last thing the other person said. |
 | `set_contact_names` | Save names for phone numbers, in any format. Names stick to the number, so they also show up in groups. |
 | `sync_now` | Pull new messages right now. |
@@ -345,7 +350,7 @@ These all cost real time to find. Read them before touching the Baileys parts.
 | `WA` | binding | The per-person Durable Object. |
 | `REGISTRY` | binding | One Durable Object that counts accounts, so `SIGNUP_LIMIT` is a real cap. |
 
-Keep a deployment's own values (domain, KV id) in `wrangler.local.jsonc`, which is gitignored, and deploy with `npm run deploy:local`. `wrangler.jsonc` is the template other people start from.
+Keep a deployment's own values (domain, KV id) in `wrangler.local.jsonc`, which is gitignored, and `npm run deploy` uses it when it exists (`wrangler.jsonc` otherwise). `wrangler.jsonc` is the template other people start from.
 
 Lost that file, or deploying from a new machine? `CLOUDFLARE_API_TOKEN=... node scripts/pull-config.mjs` rebuilds it from the live Worker: vars, KV and Durable Object bindings, email, custom domains, crons and limits, with `wrangler.jsonc` filling in what Cloudflare doesn't report. Secrets stay on Cloudflare and are only listed by name. If the live Worker has applied more Durable Object migrations than `wrangler.jsonc` lists (because it was once deployed from a config with its own steps), the script pads the list with empty placeholder steps up to the live tag; without them, wrangler refuses to deploy. Check the result with `npx wrangler deploy -c wrangler.local.jsonc --dry-run`.
 

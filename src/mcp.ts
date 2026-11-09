@@ -31,9 +31,14 @@ const NAME_HINT =
 
 type Rows = Record<string, any>[];
 
+/** Messages with a file carry their id, which get_media and transcribe_audio take. */
+const mediaTag = (r: Record<string, any>, chat?: string) => (r.media ? ` (media id: ${r.id}${chat ? ` in ${chat}` : ''})` : '');
+const TEXTUAL = /^(text\/|application\/(json|xml|csv)\b)/;
+
 const displayNumber = (jid: string) => (jid.endsWith('@s.whatsapp.net') ? `+${jid.replace('@s.whatsapp.net', '')}` : jid);
 
 function buildServer(wa: DurableObjectStub<WhatsAppStore>, env: Env, origin: string, TZ: string) {
+  const canTranscribe = Boolean(env.AI);
   const fmt = new Intl.DateTimeFormat('sv-SE', { timeZone: TZ, dateStyle: 'short', timeStyle: 'short' });
   const when = (ts: number) => fmt.format(new Date(ts * 1000));
   const server = new McpServer(
@@ -42,7 +47,9 @@ function buildServer(wa: DurableObjectStub<WhatsAppStore>, env: Env, origin: str
       instructions:
         `Access to the user's WhatsApp history. It can read and search messages and save names for phone numbers; it cannot send anything. Timestamps are ${TZ}. ` +
         `Each read first pulls anything new from WhatsApp if the store is more than a few minutes old. ` +
-        `Use list_chats to find a chat, get_messages to read it, search_messages to find things across chats. ${NAME_HINT}`,
+        `Use list_chats to find a chat, get_messages to read it, search_messages to find things across chats, unanswered_chats for direct messages still waiting on a reply. ` +
+        `Photos, voice notes, videos, documents and stickers show as labels with a media id; get_media fetches the file` +
+        `${canTranscribe ? ' and transcribe_audio turns voice notes into text' : ''}. ${NAME_HINT}`,
       maxToolInputElements: 10_000,
     },
   );
@@ -108,7 +115,7 @@ function buildServer(wa: DurableObjectStub<WhatsAppStore>, env: Env, origin: str
       }
       const rows = (await wa.getMessages({ chat: matches[0].jid, limit, before: epoch(before), after: epoch(after) })) as Rows;
       const head = `# ${matches[0].name} (${rows.length} messages)\n`;
-      return text(note + head + rows.map((r) => `[${when(r.ts)}] ${r.sender}: ${r.body}`).join('\n'));
+      return text(note + head + rows.map((r) => `[${when(r.ts)}] ${r.sender}: ${r.body}${mediaTag(r)}`).join('\n'));
     },
   );
 
@@ -140,12 +147,98 @@ function buildServer(wa: DurableObjectStub<WhatsAppStore>, env: Env, origin: str
         chatJid = m[0].jid;
       }
       const { hits } = await wa.search({ queries: qs, chat: chatJid, since: epoch(since), until: epoch(until), limit });
-      const lines = (rows: typeof hits[number]) => rows.map((r) => `[${when(r.ts)}] ${r.chat_name} | ${r.sender}: ${clip(r.body)}`).join('\n');
+      const lines = (rows: typeof hits[number]) => rows.map((r) => `[${when(r.ts)}] ${r.chat_name} | ${r.sender}: ${clip(r.body)}${mediaTag(r, r.chat)}`).join('\n');
       const none = `No matches. If you were looking for something a particular person said, they may be saved only as a number. ${NAME_HINT}`;
       if (qs.length === 1) return text(note + (hits[0].length ? lines(hits[0]) : none));
       return text(note + qs.map((q, i) => `## ${q} (${hits[i].length} match${hits[i].length === 1 ? '' : 'es'})\n${hits[i].length ? lines(hits[i]) : 'No matches.'}`).join('\n\n'));
     },
   );
+
+  server.registerTool(
+    'unanswered_chats',
+    {
+      description:
+        'Direct (one-to-one) chats where the other person wrote last and the user has not replied, most recent first. Groups are left out. ' +
+        "A reaction from the user counts as a reply. Each row says how many messages are waiting, since when, and the last one. " +
+        'Looks at chats active in the last 14 days unless `since` says otherwise.',
+      inputSchema: {
+        since: z.string().optional().describe('ISO date; only chats with a message at or after this. Default: 14 days ago'),
+        limit: z.number().int().min(1).max(100).default(30),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ since, limit }) => {
+      const note = await fresh();
+      const from = epoch(since) ?? Math.floor(Date.now() / 1000) - 14 * 86400;
+      const rows = (await wa.unanswered({ since: from, limit })) as Rows;
+      if (!rows.length) return text(note + `No direct chats are waiting on a reply since ${when(from)}.`);
+      const lines = rows.map(
+        (r) => `${r.name} | ${r.waiting}${r.more ? '+' : ''} waiting since ${when(r.since)} | last ${when(r.last_ts)}: "${oneLine(r.last, 160)}" | ${r.jid}`,
+      );
+      return text(note + `${rows.length} direct chats waiting on a reply:\n${lines.join('\n')}`);
+    },
+  );
+
+  /** A chat for the media tools: a jid as shown, or a name that matches exactly one chat. */
+  const oneChat = async (chat: string): Promise<{ jid: string } | { error: string }> => {
+    const m = (await wa.resolveChat(chat)) as { jid: string; name: string }[];
+    if (!m.length) return { error: `No chat matches "${chat}". Pass the jid shown with the media id.` };
+    if (m.length > 1 && !chat.includes('@')) return { error: `"${chat}" matches several chats, pass the jid:\n` + m.map((c) => `${c.name} | ${c.jid}`).join('\n') };
+    return { jid: m[0].jid };
+  };
+
+  server.registerTool(
+    'get_media',
+    {
+      description:
+        'Fetch the file behind a photo, sticker, voice note, audio, video or document. Take `message_id` from the "(media id: ...)" in get_messages or ' +
+        'search_messages, and `chat` from the same place (the chat you read, or the jid after "in"). Images and stickers come back as images, audio as audio, ' +
+        'text documents as text, and other files (PDFs, videos) as an embedded file. Files over 10 MB are refused. ' +
+        "WhatsApp keeps files for a few weeks; for older ones the phone is asked to upload the file again, which only works while it is online and still has it." +
+        (canTranscribe ? ' For what a voice note says, transcribe_audio is cheaper than fetching the audio.' : ''),
+      inputSchema: {
+        chat: z.string().describe('Chat jid, or a name that matches one chat'),
+        message_id: z.string().describe('The media id shown next to the message'),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ chat, message_id }) => {
+      const c = await oneChat(chat);
+      if ('error' in c) return text(c.error);
+      const r = await wa.fetchMedia(c.jid, message_id);
+      if (!r.ok) return { content: [{ type: 'text' as const, text: `Could not get that file: ${r.error}.` }], isError: true };
+      const mime = r.mime.split(';')[0].trim();
+      const about = { type: 'text' as const, text: `${r.kind}${r.name ? ` "${r.name}"` : ''}, ${mime}, ${Math.ceil(r.size / 1024)} KB${r.reuploaded ? ' (uploaded again by the phone)' : ''}` };
+      if (r.kind === 'image' || r.kind === 'sticker') return { content: [about, { type: 'image' as const, data: r.data, mimeType: mime }] };
+      if (r.kind === 'audio') return { content: [about, { type: 'audio' as const, data: r.data, mimeType: mime }] };
+      const uri = `whatsapp://media/${encodeURIComponent(c.jid)}/${encodeURIComponent(message_id)}`;
+      const resource = TEXTUAL.test(mime) ? { uri, mimeType: mime, text: Buffer.from(r.data, 'base64').toString('utf8') } : { uri, mimeType: mime, blob: r.data };
+      return { content: [about, { type: 'resource' as const, resource }] };
+    },
+  );
+
+  if (canTranscribe) {
+    server.registerTool(
+      'transcribe_audio',
+      {
+        description:
+          'Turn voice notes and audio messages in one chat into text. Take the ids from the "(media id: ...)" next to [voice note] or [audio] in get_messages ' +
+          'or search_messages, and put every one you need from a chat in one call. A transcript is kept with its message, so asking again is free, and ' +
+          'get_messages and search_messages show and find its words afterwards. Transcription runs on a speech model at Cloudflare, where this server runs.',
+        inputSchema: {
+          chat: z.string().describe('Chat jid, or a name that matches one chat'),
+          message_ids: z.array(z.string()).min(1).max(20).describe('Media ids of the voice notes'),
+        },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      async ({ chat, message_ids }) => {
+        const c = await oneChat(chat);
+        if ('error' in c) return text(c.error);
+        const rows = await wa.transcribeAudio(c.jid, message_ids);
+        return text(rows.map((r) => (r.ok ? `${r.id}: ${r.text}` : `${r.id}: could not transcribe (${r.text})`)).join('\n\n'));
+      },
+    );
+  }
 
   server.registerTool(
     'unnamed_chats',

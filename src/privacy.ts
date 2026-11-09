@@ -20,7 +20,7 @@ const encryption = (hosted: boolean) => hosted ? `<p><strong>Encryption.</strong
 function ownPolicy(operator?: string, contact?: string) {
   return `
 <h1>Privacy policy</h1>
-<p class="muted">Last updated October 19, 2026</p>
+<p class="muted">Last updated November 9, 2026</p>
 
 <p>Short version: this server reads one person's WhatsApp messages and shows them only to that person's own AI agent. Nothing is sold, shared or used for advertising.</p>
 
@@ -32,7 +32,8 @@ function ownPolicy(operator?: string, contact?: string) {
 <p><strong>Names.</strong> The owner's AI agent can save a name for a phone number, for example after finding it in the owner's contacts. The server stores the name and number the agent gives it, next to the messages. It never connects to a contacts service itself.</p>
 
 <h2>What it keeps</h2>
-<p>Message text (photos, voice notes and documents are kept only as labels like [image], never as files), chat and contact names, names the owner or their agent saved for phone numbers, and the WhatsApp session credentials. All of it lives in a database inside the owner's own Cloudflare account. This software stores nothing anywhere else.</p>
+<p>Message text, chat and contact names, names the owner or their agent saved for phone numbers, and the WhatsApp session credentials. All of it lives in a database inside the owner's own Cloudflare account. This software stores nothing anywhere else.</p>
+<p><strong>Photos, voice notes and documents</strong> are not kept as files. The server keeps, with each message, what it needs to fetch the file from WhatsApp, and fetches it only when the owner's agent asks, passing it to the agent without storing it. When the agent asks for a voice note to be transcribed, the audio goes to a speech model that Cloudflare runs (Workers AI, in the owner's own account), and the transcript is kept with the message.</p>
 ${encryption(false)}
 
 <h2>Who can see it</h2>
@@ -55,7 +56,7 @@ ${encryption(false)}
 function hostedPolicy(operator?: string, contact?: string) {
   return `
 <h1>Privacy policy</h1>
-<p class="muted">Last updated October 19, 2026</p>
+<p class="muted">Last updated November 9, 2026</p>
 
 <p>Short version: this service stores your WhatsApp messages encrypted, and shows them only to you and the AI agents you connect. Nothing is sold, shared or used for advertising. The operator could technically read them and does not.</p>
 
@@ -69,7 +70,8 @@ function hostedPolicy(operator?: string, contact?: string) {
 <p><strong>Names.</strong> Your AI agent can save a name for a phone number, for example after finding it in your contacts. The service stores the name and number the agent gives it, next to your messages. It never connects to a contacts service itself.</p>
 
 <h2>What it keeps</h2>
-<p>Message text (photos, voice notes and documents are kept only as labels like [image], never as files), chat and contact names, names you or your agent saved for phone numbers, and the WhatsApp session credentials. They are stored in a database at Cloudflare, one per user, kept apart from everyone else's. If a history is larger than the service takes, it is not kept: what arrived is deleted when the limit is reached and your phone is unlinked.</p>
+<p>Message text, chat and contact names, names you or your agent saved for phone numbers, and the WhatsApp session credentials. They are stored in a database at Cloudflare, one per user, kept apart from everyone else's. If a history is larger than the service takes, it is not kept: what arrived is deleted when the limit is reached and your phone is unlinked.</p>
+<p><strong>Photos, voice notes and documents</strong> are not kept as files. The service keeps, encrypted with each message, what it needs to fetch the file from WhatsApp, and fetches it only when your agent asks, passing it to the agent without storing it. When your agent asks for a voice note to be transcribed, the audio goes to a speech model that Cloudflare runs (Workers AI), the same company that hosts the service, and the transcript is kept, encrypted, with the message.</p>
 ${encryption(true)}
 
 <h2>Who can see it</h2>

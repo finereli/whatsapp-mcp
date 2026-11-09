@@ -37,6 +37,10 @@ export interface Env extends AuthEnv {
   OPERATOR_NAME?: string;
   /** Country code (digits, no +) for phone numbers given without one, e.g. "972". */
   DEFAULT_COUNTRY_CODE?: string;
+  /** Workers AI. Turns on transcribe_audio, which runs voice notes through a speech model on Cloudflare. Optional. */
+  AI?: Ai;
+  /** Workers AI model for transcription. Optional; see DEFAULT_TRANSCRIBE_MODEL in transcribe.ts. */
+  TRANSCRIBE_MODEL?: string;
 }
 
 /** What an agent's token carries: who, and the key that opens their data. Encrypted by the OAuth library under the token. */

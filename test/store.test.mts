@@ -2,6 +2,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { initSchema, isLegacy, matches, migrateLegacy, parseQuery, Store } from '../src/store.ts';
 import { sqliteAuthState } from '../src/auth-state.ts';
+import { decryptMedia } from '../src/media.ts';
 import { limitsOf, verdict } from '../src/limits.ts';
 import { createAccount, KDF_ITERATIONS, KEY_STRETCH, newToken, PBKDF2_PASS, openAccount, rewrap, tokenId, unwrapForToken, Vault, wrapForToken } from '../src/vault.ts';
 
@@ -440,6 +441,67 @@ for (const [i, cc, want] of cases) check(`toJid(${JSON.stringify(i)}, ${cc})`, t
   st.addAlias(SL, SPN);
   check('merged chats stay searchable', st.search({ queries: ['kangaroo'], limit: 5 }).hits[0].length === 2);
   agree('after edits and a merge');
+}
+
+// ---------- media, transcripts, unanswered chats ----------
+{
+  const { sql: msql } = makeSql();
+  initSchema(msql);
+  const ms = new Store(msql, (fn) => fn(), vault);
+  const NOA = '972566666666@s.whatsapp.net', ROI = '972577777777@s.whatsapp.net', GRP = '5555@g.us', SPAM = '972588888888@s.whatsapp.net';
+  const mediaKey = crypto.getRandomValues(new Uint8Array(32));
+  const voice = (id: string, chat: string, ts: number, withKey = true) => ({
+    key: { id, remoteJid: chat, fromMe: false }, messageTimestamp: ts,
+    message: { audioMessage: { ptt: true, seconds: 7, mimetype: 'audio/ogg; codecs=opus', fileLength: 14000, ...(withKey ? { mediaKey, directPath: '/v/t62.7117-24/abc', url: 'https://mmg.whatsapp.net/v/abc' } : {}) } },
+  }) as any;
+
+  ms.ingestMessages([voice('v1', NOA, 100, false)]);
+  check('a voice note stored without download details has no media ref', ms.media(NOA, 'v1')?.ref === undefined);
+  ms.ingestMessages([voice('v1', NOA, 100)]);
+  const ref = ms.media(NOA, 'v1')?.ref;
+  check('a repeat delivery fills them in', ref?.k === 'audio' && ref.path === '/v/t62.7117-24/abc' && ref.mime?.startsWith('audio/ogg') && ref.len === 14000, ref);
+  check('with the key and the message key', Buffer.from(ref!.key, 'base64').equals(Buffer.from(mediaKey)) && ref!.rk.remoteJid === NOA && ref!.rk.fromMe === false);
+  check('the key is sealed, not stored in the clear', !(msql.exec(`SELECT data FROM messages`).toArray() as any[]).some((r) => Buffer.from(r.data).includes(Buffer.from(mediaKey))));
+  check('get_messages marks it as media', (ms.getMessages({ chat: NOA, limit: 5 }) as any[])[0].media === true);
+  check('no media ref for a message that does not exist', ms.media(NOA, 'nope') === null);
+
+  ms.setTranscript(NOA, 'v1', 'meet me at the bakery on Herzl street');
+  check('a transcript is kept', ms.media(NOA, 'v1')?.transcript === 'meet me at the bakery on Herzl street');
+  check('and shows after the label', (ms.getMessages({ chat: NOA, limit: 5 }) as any[])[0].body === '[voice note 7s] transcript: meet me at the bakery on Herzl street');
+  const found = ms.search({ queries: ['bakery'], limit: 5 }).hits[0];
+  check('search finds words in a transcript', found.length === 1 && found[0].media === true, found);
+  ms.setTranscript(NOA, 'v1', 'meet me at the cafe');
+  check('transcribing again replaces it, not appends', (ms.getMessages({ chat: NOA, limit: 5 }) as any[])[0].body === '[voice note 7s] transcript: meet me at the cafe');
+
+  // unanswered: Noa wrote last (twice), Roi got my reply, my reaction answers Spam, the group never counts
+  ms.ingestMessages([
+    M('n2', NOA, 110, 'are you coming?', false, { pushName: 'Noa' }),
+    M('r1', ROI, 120, 'call me'), M('r2', ROI, 130, 'calling now', true),
+    M('s1', SPAM, 140, 'win a prize'),
+    M('g1', GRP, 150, 'anyone?', false, { key: { participant: NOA } }),
+  ]);
+  ms.ingestMessages([{ key: { id: 'x1', remoteJid: SPAM, fromMe: true }, messageTimestamp: 160, message: { reactionMessage: { key: { id: 's1' }, text: '👍', senderTimestampMs: 160000 } } } as any]);
+  ms.ingestMessages([{ key: { id: 'x2', remoteJid: NOA, fromMe: false }, messageTimestamp: 170, message: { reactionMessage: { key: { id: 'n2' }, text: '❤️', senderTimestampMs: 170000 } } } as any]);
+  const ua = ms.unanswered({ since: 0, limit: 10 }) as any[];
+  check('unanswered lists only the direct chat waiting on me', ua.length === 1 && ua[0].jid === NOA, ua.map((r) => r.jid));
+  check('counting what is waiting, ignoring their own reaction', ua[0]?.waiting === 2 && ua[0].since === 100 && ua[0].last === 'are you coming?', ua[0]);
+  check('since leaves out quieter chats', ms.unanswered({ since: 200, limit: 10 }).length === 0);
+}
+
+// WhatsApp's media encryption, built the way a sender does, opened by decryptMedia
+{
+  const mediaKey = crypto.getRandomValues(new Uint8Array(32));
+  const plain = new TextEncoder().encode('OggS pretend voice note bytes '.repeat(40));
+  const base = await crypto.subtle.importKey('raw', mediaKey, 'HKDF', false, ['deriveBits']);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode('WhatsApp Audio Keys') }, base, 112 * 8));
+  const iv = bits.slice(0, 16), ck = bits.slice(16, 48), mk = bits.slice(48, 80);
+  const enc = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-CBC', iv }, await crypto.subtle.importKey('raw', ck, 'AES-CBC', false, ['encrypt']), plain));
+  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', await crypto.subtle.importKey('raw', mk, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']), Buffer.concat([iv, enc]))).slice(0, 10);
+  const file = Buffer.concat([enc, mac]);
+  check('a WhatsApp media file decrypts', Buffer.from((await decryptMedia(file, mediaKey, 'audio'))!).equals(Buffer.from(plain)));
+  check('the wrong media type does not', (await decryptMedia(file, mediaKey, 'image')) === null);
+  const bad = Buffer.from(file); bad[5] ^= 1;
+  check('a tampered file is refused', (await decryptMedia(bad, mediaKey, 'audio')) === null);
 }
 
 console.log(failed ? `\n${failed} FAILED` : '\nall passed');
