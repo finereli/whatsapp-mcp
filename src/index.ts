@@ -236,6 +236,7 @@ const ownerHandler = {
       if (!pinOk(request, env)) return new Response('unauthorized', { status: 401 });
       const registry = seatRegistry(env);
       if (url.searchParams.get('u') === 'seats') return json({ taken: await registry.count(), limit: signupLimit, waiting: await registry.waiting() });
+      if (url.searchParams.get('u') === 'signups') return json(await registry.days());
       if (url.searchParams.get('u') === 'waitlist') {
         const email = url.searchParams.get('remove');
         if (email && request.method === 'POST') return json({ removed: await registry.unlist(email.toLowerCase()) });
@@ -262,12 +263,14 @@ const oauth = new OAuthProvider({
 export default {
   fetch: (request: Request, env: Env, ctx: ExecutionContext) => oauth.fetch(request, env, ctx),
   /**
-   * Once a day, write the seat and waitlist counts to the log, where the operator (or their agent, through
+   * Once a day, write the seat and waitlist counts, and yesterday's signups and deletions, to the log, where the operator (or their agent, through
    * Cloudflare's API) can read them without the PIN. Counts only.
    */
   async scheduled(_event: ScheduledController, env: Env) {
     if (serverMode(env) !== 'multi') return;
     const registry = seatRegistry(env);
-    console.log(JSON.stringify({ stats: { taken: await registry.count(), limit: signupLimitOf(env), waiting: await registry.waiting() } }));
+    const day = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    const yesterday = (await registry.days(3)).find((d) => d.day === day) ?? { day, joined: 0, left: 0 };
+    console.log(JSON.stringify({ stats: { taken: await registry.count(), limit: signupLimitOf(env), waiting: await registry.waiting(), yesterday } }));
   },
 };

@@ -169,7 +169,7 @@ export async function signInWithLogin(env: AuthEnv, who: { sub: string; key: str
   if (!seat.ok) return { ok: false, error: `This service is full: it takes ${limit} people for now.`, status: 503, full: true };
   const made = await createAccount(who.key, KEY_STRETCH);
   if (!(await stub.createAccount(made.record, timezone))) {
-    await registry.release(); // lost a race with another first sign-in; it exists now
+    await registry.release(true); // lost a race with another first sign-in; it exists now
     return signInWithLogin(env, who, timezone);
   }
   return { ok: true, who: { userId, dek: made.dek }, seats: { taken: seat.count, limit } };
