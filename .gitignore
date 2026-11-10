@@ -17,3 +17,6 @@ local-export/auth/
 local-export/exports/
 data/
 .env
+
+# private files for this deployment, encrypted with git-crypt (see .gitattributes)
+!secrets/**
