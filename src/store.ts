@@ -399,8 +399,10 @@ export class Store {
     lid = jidNormalizedUser(lid);
     pn = jidNormalizedUser(pn);
     const L = this.pj(lid), P = this.pj(pn);
-    this.tally?.add(this.aliases().get(lid) === pn ? 'same:alias' : 'new:alias', 1);
-    this.sql.exec(`INSERT OR REPLACE INTO alias (cid, data) VALUES (?, ?)`, L, this.vault.seal({ lid, pn }, ALIAS));
+    // WhatsApp repeats mappings it already sent; rewriting one costs rows written and changes nothing
+    const known = this.aliases().get(lid) === pn;
+    this.tally?.add(known ? 'same:alias' : 'new:alias', 1);
+    if (!known) this.sql.exec(`INSERT OR REPLACE INTO alias (cid, data) VALUES (?, ?)`, L, this.vault.seal({ lid, pn }, ALIAS));
     this.aliases().set(lid, pn);
     // fold anything already stored under the lid into the phone-number jid
     const sentAsLid = written(this.sql.exec(`DELETE FROM lid_senders WHERE sender = ?`, L)) > 0;
@@ -575,8 +577,9 @@ export class Store {
         const name = isPlaceholder(c.name) ? null : c.name;
         const notify = isPlaceholder(c.notify ?? c.verifiedName) ? null : (c.notify ?? c.verifiedName);
         const rec: ContactRec = { jid, name: name ?? prev?.name ?? null, notify: notify ?? prev?.notify ?? null };
-        this.tally?.add(prev && prev.name === rec.name && prev.notify === rec.notify ? 'same:contacts' : 'new:contacts', 1);
-        this.sql.exec(`INSERT OR REPLACE INTO contacts (cid, data) VALUES (?, ?)`, cid, this.vault.seal(rec, CONTACT));
+        const same = Boolean(prev && prev.name === rec.name && prev.notify === rec.notify);
+        this.tally?.add(same ? 'same:contacts' : 'new:contacts', 1);
+        if (!same) this.sql.exec(`INSERT OR REPLACE INTO contacts (cid, data) VALUES (?, ?)`, cid, this.vault.seal(rec, CONTACT));
       }
     });
     this.dirty();
@@ -588,8 +591,11 @@ export class Store {
         const name = c.name ?? c.subject;
         if (!c.id || !name || isPlaceholder(name)) continue;
         const jid = this.norm(c.id) ?? c.id;
-        const rec = this.getChat(jid) ?? { jid, group: jid.endsWith('@g.us') ? 1 : 0 } as ChatRec;
-        this.tally?.add(rec.name === name ? 'same:chats' : 'new:chats', 1);
+        const old = this.getChat(jid);
+        // every pull fetches every group again, almost always with the name already stored
+        this.tally?.add(old?.name === name ? 'same:chats' : 'new:chats', 1);
+        if (old?.name === name) continue;
+        const rec = old ?? { jid, group: jid.endsWith('@g.us') ? 1 : 0 } as ChatRec;
         rec.name = name;
         this.putChat(rec);
       }
