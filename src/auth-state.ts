@@ -24,6 +24,7 @@ export function sqliteAuthState(sql: SqlStorage, vault: Vault, onPaired: (paired
       // measuring: how many of these rewrites store what was already there
       const r = sql.exec<{ data: ArrayBuffer }>(`SELECT data FROM auth WHERE k = ?`, row(k)).toArray()[0];
       tally.add(r && vault.open<string>(r.data, AAD) === json ? `same:${keyType(k)}` : `new:${keyType(k)}`, 1);
+      tally.once(`uniq:${keyType(k)}`, k); // fewer distinct keys than writes: batching them would save the difference
     }
     const c = sql.exec(`INSERT OR REPLACE INTO auth (k, data) VALUES (?, ?)`, row(k), vault.seal(json, AAD));
     tally?.add(`key:${keyType(k)}`, c.rowsWritten);

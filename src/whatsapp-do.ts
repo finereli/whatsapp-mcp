@@ -82,7 +82,7 @@ export class WhatsAppStore extends DurableObject<Env> {
     // So tables are made when an account is, and an empty leftover from before that is erased.
     const sql = ctx.storage.sql;
     if (isLeftover(sql)) ctx.blockConcurrencyWhile(() => ctx.storage.deleteAll());
-    else if (hasSchema(sql)) initSchema(sql);
+    else if (hasSchema(sql)) initSchema(sql, (fn) => ctx.storage.transactionSync(fn));
   }
 
   // ---------- accounts and keys (no key needed) ----------

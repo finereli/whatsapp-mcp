@@ -33,7 +33,9 @@ export interface MediaRef {
 
 const TABLES = ['messages', 'chats', 'contacts', 'custom_names', 'alias', 'auth'] as const;
 
-function createTables(sql: SqlStorage) {
+type Tx = <T>(fn: () => T) => T;
+
+function createTables(sql: SqlStorage, tx: Tx) {
   sql.exec(`
     CREATE TABLE IF NOT EXISTS messages (
       id TEXT NOT NULL, chat TEXT NOT NULL, ts INTEGER NOT NULL, from_me INTEGER NOT NULL,
@@ -41,14 +43,39 @@ function createTables(sql: SqlStorage) {
       PRIMARY KEY (chat, id)
     );
     CREATE INDEX IF NOT EXISTS messages_chat_ts ON messages (chat, ts);
-    CREATE INDEX IF NOT EXISTS messages_ts ON messages (ts);
     CREATE TABLE IF NOT EXISTS chats (cid TEXT PRIMARY KEY, data BLOB NOT NULL);
     CREATE TABLE IF NOT EXISTS contacts (cid TEXT PRIMARY KEY, data BLOB NOT NULL);
     CREATE TABLE IF NOT EXISTS custom_names (cid TEXT PRIMARY KEY, data BLOB NOT NULL);
     CREATE TABLE IF NOT EXISTS alias (cid TEXT PRIMARY KEY, data BLOB NOT NULL);
-    CREATE TABLE IF NOT EXISTS auth (k TEXT PRIMARY KEY, data BLOB NOT NULL);
+    CREATE TABLE IF NOT EXISTS auth (k TEXT PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID;
   `);
   createDerived(sql);
+  trimWrites(sql, tx);
+}
+
+/**
+ * Durable Objects bill each row written, and an index entry counts as a row. Two changes, both one-time:
+ * - messages_ts was never used (every query filters on chat, which messages_chat_ts covers), but cost a row
+ *   on every message written.
+ * - auth gets rewritten as WhatsApp's encryption moves on, about once per message in a group. With a text key,
+ *   SQLite keeps a hidden index beside the table, so each write was two rows. WITHOUT ROWID keeps them in one.
+ */
+function trimWrites(sql: SqlStorage, tx: Tx) {
+  sql.exec(`DROP INDEX IF EXISTS messages_ts`);
+  const auth = sql.exec<{ sql: string }>(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'auth'`).toArray()[0];
+  if (!auth || /WITHOUT ROWID/i.test(auth.sql)) return;
+  // all or nothing: losing this table would unlink the person's WhatsApp. If it fails, the old table stays and works.
+  try {
+    tx(() => {
+      sql.exec(`DROP TABLE IF EXISTS auth_new`);
+      sql.exec(`CREATE TABLE auth_new (k TEXT PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID`);
+      sql.exec(`INSERT INTO auth_new (k, data) SELECT k, data FROM auth`);
+      sql.exec(`DROP TABLE auth`);
+      sql.exec(`ALTER TABLE auth_new RENAME TO auth`);
+    });
+  } catch (e) {
+    console.error('auth table rebuild failed, keeping the old one', e);
+  }
 }
 
 /**
@@ -122,12 +149,12 @@ export function isLegacy(sql: SqlStorage): boolean {
 }
 
 /** Tables that need no key. A plaintext database from the first release is left alone until there is a key to encrypt it with. */
-export function initSchema(sql: SqlStorage) {
+export function initSchema(sql: SqlStorage, tx: Tx = (fn) => fn()) {
   sql.exec(`
     CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
     CREATE TABLE IF NOT EXISTS account (k TEXT PRIMARY KEY, v TEXT NOT NULL);
   `);
-  if (!isLegacy(sql)) createTables(sql);
+  if (!isLegacy(sql)) createTables(sql, tx);
   sql.exec(`DELETE FROM meta WHERE k LIKE 'google_%'`);
 }
 
@@ -140,7 +167,7 @@ export function migrateLegacy(sql: SqlStorage, vault: Vault, tx: <T>(fn: () => T
     for (const t of TABLES) if (tableExists(sql, t)) sql.exec(`ALTER TABLE ${t} RENAME TO legacy_${t}`);
     // an earlier version synced names from Google; those names are ordinary custom names now
     if (tableExists(sql, 'google_contacts') && !tableExists(sql, 'legacy_custom_names')) sql.exec(`ALTER TABLE google_contacts RENAME TO legacy_custom_names`);
-    createTables(sql);
+    createTables(sql, (fn) => fn()); // already inside tx
 
     const pid = (j: string) => vault.pid('jid', j);
     const lastPush = new Map<string, { p: string; ts: number }>();

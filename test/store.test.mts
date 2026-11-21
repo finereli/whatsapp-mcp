@@ -540,5 +540,27 @@ for (const [i, cc, want] of cases) check(`toJid(${JSON.stringify(i)}, ${cc})`, t
   check('key types', keyType('app-state-sync-version-regular') === 'app-state-sync-version' && keyType('sender-key-memory-1@g.us') === 'sender-key-memory' && keyType('creds') === 'creds', null);
 }
 
+// ---------- trimming writes on an existing store ----------
+{
+  const { db, sql } = makeSql();
+  db.exec(`CREATE TABLE meta (k TEXT PRIMARY KEY, v TEXT); CREATE TABLE account (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+    CREATE TABLE messages (id TEXT NOT NULL, chat TEXT NOT NULL, ts INTEGER NOT NULL, from_me INTEGER NOT NULL, sender TEXT, type TEXT NOT NULL, data BLOB NOT NULL, PRIMARY KEY (chat, id));
+    CREATE INDEX messages_chat_ts ON messages (chat, ts); CREATE INDEX messages_ts ON messages (ts);
+    CREATE TABLE auth (k TEXT PRIMARY KEY, data BLOB NOT NULL);`);
+  const v = new Vault(Buffer.from(crypto.getRandomValues(new Uint8Array(32))));
+  const before = sqliteAuthState(sql, v);
+  await before.state.keys.set({ session: { '972500000002.0': Buffer.from('kept') } } as any);
+  await before.saveCreds();
+  initSchema(sql);
+  const master = (name: string) => (db.prepare(`SELECT sql FROM sqlite_master WHERE name = ?`).get(name) as any)?.sql ?? null;
+  check('an existing store loses the unused ts index', master('messages_ts') === null && master('messages_chat_ts') !== null, null);
+  check('and its keys table becomes WITHOUT ROWID', /WITHOUT ROWID/i.test(master('auth')), master('auth'));
+  const after = sqliteAuthState(sql, v);
+  const got = await after.state.keys.get('session', ['972500000002.0']);
+  check('with every key still there', Buffer.from((got as any)['972500000002.0']).toString() === 'kept' && Boolean(after.state.creds.noiseKey), got);
+  initSchema(sql);
+  check('and doing it again changes nothing', /WITHOUT ROWID/i.test(master('auth')), null);
+}
+
 console.log(failed ? `\n${failed} FAILED` : '\nall passed');
 process.exit(failed ? 1 : 0);

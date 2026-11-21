@@ -4,15 +4,24 @@
  */
 export class WriteTally {
   private by: Record<string, number> = {};
+  private seen = new Set<string>();
 
   add(label: string, n: number) {
     if (n > 0) this.by[label] = (this.by[label] ?? 0) + n;
+  }
+
+  /** Count `label` once per distinct `key` until the next take(): how many different keys a pull touched. */
+  once(label: string, key: string) {
+    if (this.seen.has(`${label}\0${key}`)) return;
+    this.seen.add(`${label}\0${key}`);
+    this.add(label, 1);
   }
 
   /** The counts so far, largest first, and start again. */
   take(): Record<string, number> {
     const out = Object.fromEntries(Object.entries(this.by).sort((a, b) => b[1] - a[1]));
     this.by = {};
+    this.seen.clear();
     return out;
   }
 }
