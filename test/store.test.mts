@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { initSchema, isLegacy, matches, migrateLegacy, parseQuery, Store } from '../src/store.ts';
 import { sqliteAuthState } from '../src/auth-state.ts';
 import { decryptMedia } from '../src/media.ts';
+import { WriteTally, countingSql, keyType } from '../src/write-tally.ts';
 import { limitsOf, verdict } from '../src/limits.ts';
 import { createAccount, KDF_ITERATIONS, KEY_STRETCH, newToken, PBKDF2_PASS, openAccount, rewrap, tokenId, unwrapForToken, Vault, wrapForToken } from '../src/vault.ts';
 
@@ -502,6 +503,29 @@ for (const [i, cc, want] of cases) check(`toJid(${JSON.stringify(i)}, ${cc})`, t
   check('the wrong media type does not', (await decryptMedia(file, mediaKey, 'image')) === null);
   const bad = Buffer.from(file); bad[5] ^= 1;
   check('a tampered file is refused', (await decryptMedia(bad, mediaKey, 'audio')) === null);
+}
+
+// ---------- counting writes ----------
+{
+  const { sql: raw } = makeSql();
+  initSchema(raw);
+  const tally = new WriteTally();
+  const sql = countingSql(raw, tally);
+  const v = new Vault(Buffer.from(crypto.getRandomValues(new Uint8Array(32))));
+  const st = new Store(sql, (fn) => fn(), v, tally);
+  st.upsertChatNames([{ id: '123@g.us', subject: 'Hikers' }]);
+  const first = tally.take();
+  st.upsertChatNames([{ id: '123@g.us', subject: 'Hikers' }]);
+  const second = tally.take();
+  check('writes are tallied by table', first.chats > 0 && first['new:chats'] === 1, first);
+  check('an unchanged group name is counted as a rewrite', second['same:chats'] === 1 && second.chats > 0, second);
+  const auth = sqliteAuthState(sql, v, () => {}, tally);
+  tally.take();
+  await auth.state.keys.set({ session: { '972500000000.0': Buffer.from('abc') } } as any);
+  await auth.state.keys.set({ session: { '972500000000.0': Buffer.from('abc') } } as any);
+  const keys = tally.take();
+  check('key writes are tallied by type, with unchanged ones', keys['key:session'] >= 2 && keys['new:session'] === 1 && keys['same:session'] === 1, keys);
+  check('key types', keyType('app-state-sync-version-regular') === 'app-state-sync-version' && keyType('sender-key-memory-1@g.us') === 'sender-key-memory' && keyType('creds') === 'creds', null);
 }
 
 console.log(failed ? `\n${failed} FAILED` : '\nall passed');

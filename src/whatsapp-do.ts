@@ -11,6 +11,7 @@
  * connected, writes it to SQLite, and hangs up. Pairing is the same session
  * with the QR exposed and a longer leash, so the first full history sync lands.
  */
+import { WriteTally, countingSql } from './write-tally.js';
 import { liveIntervals } from './polyfills.js';
 import { DurableObject } from 'cloudflare:workers';
 import { makeWASocket, DisconnectReason } from '@whiskeysockets/baileys';
@@ -149,12 +150,16 @@ export class WhatsAppStore extends DurableObject<Env> {
       this.setMeta('canary', b64(vault.seal('ok', 'canary')));
     }
     // told on every unlock and every creds save; only a change is worth a write
-    const auth = sqliteAuthState(sql, vault, (paired) => {
+    // the store and keys write through a counter, so each pull can log what it wrote (see write-tally.ts)
+    const counted = countingSql(sql, this.writes);
+    const auth = sqliteAuthState(counted, vault, (paired) => {
       const v = paired ? '1' : '0';
       if (this.meta('paired') !== v) this.setMeta('paired', v);
-    });
-    this.unlocked = { dek, vault, auth, store: new Store(sql, tx, vault) };
+    }, this.writes);
+    this.unlocked = { dek, vault, auth, store: new Store(counted, tx, vault, this.writes) };
   }
+
+  private writes = new WriteTally();
 
   private note(msg: string) {
     this.events.push(`${new Date().toISOString().slice(11, 19)} ${msg}`);
@@ -437,6 +442,7 @@ export class WhatsAppStore extends DurableObject<Env> {
     const intervalsBefore = new Set(liveIntervals);
     this.sessionAdded = 0;
     this.historyProgress = null;
+    this.writes.take(); // count this session only
     this.phase = 'connecting';
     this.qr = null;
     this.pairingCode = null;
@@ -475,6 +481,7 @@ export class WhatsAppStore extends DurableObject<Env> {
         this.pairingCode = null;
         if (this.auth.isPaired() && reason !== 'logged_out') this.store.setMeta('last_pull', String(Date.now()));
         this.note(`session end: ${reason}, +${this.sessionAdded} messages`);
+        console.log(JSON.stringify({ pull: { reason, pairing: opts.pairing, ms: Date.now() - started, added: this.sessionAdded, writes: this.writes.take() } }));
         resolve({ reason, added: this.sessionAdded, ms: Date.now() - started });
       };
 

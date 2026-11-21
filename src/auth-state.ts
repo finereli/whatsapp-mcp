@@ -2,6 +2,7 @@
 import { initAuthCreds, BufferJSON, proto } from '@whiskeysockets/baileys';
 import type { AuthenticationCreds, AuthenticationState, SignalDataTypeMap } from '@whiskeysockets/baileys';
 import type { Vault } from './vault.js';
+import { keyType, type WriteTally } from './write-tally.js';
 
 const AAD = 'a';
 
@@ -10,16 +11,27 @@ const AAD = 'a';
  * too, not just the values. `onPaired` hears when the link appears or goes away, so a caller can remember it
  * without a key.
  */
-export function sqliteAuthState(sql: SqlStorage, vault: Vault, onPaired: (paired: boolean) => void = () => {}) {
+export function sqliteAuthState(sql: SqlStorage, vault: Vault, onPaired: (paired: boolean) => void = () => {}, tally?: WriteTally) {
   const row = (k: string) => vault.pid('auth', k);
 
   const read = (k: string) => {
     const r = sql.exec<{ data: ArrayBuffer }>(`SELECT data FROM auth WHERE k = ?`, row(k)).toArray()[0];
     return r ? JSON.parse(vault.open<string>(r.data, AAD), BufferJSON.reviver) : null;
   };
-  const write = (k: string, value: unknown) =>
-    sql.exec(`INSERT OR REPLACE INTO auth (k, data) VALUES (?, ?)`, row(k), vault.seal(JSON.stringify(value, BufferJSON.replacer), AAD));
-  const remove = (k: string) => sql.exec(`DELETE FROM auth WHERE k = ?`, row(k));
+  const write = (k: string, value: unknown) => {
+    const json = JSON.stringify(value, BufferJSON.replacer);
+    if (tally) {
+      // measuring: how many of these rewrites store what was already there
+      const r = sql.exec<{ data: ArrayBuffer }>(`SELECT data FROM auth WHERE k = ?`, row(k)).toArray()[0];
+      tally.add(r && vault.open<string>(r.data, AAD) === json ? `same:${keyType(k)}` : `new:${keyType(k)}`, 1);
+    }
+    const c = sql.exec(`INSERT OR REPLACE INTO auth (k, data) VALUES (?, ?)`, row(k), vault.seal(json, AAD));
+    tally?.add(`key:${keyType(k)}`, c.rowsWritten);
+  };
+  const remove = (k: string) => {
+    const c = sql.exec(`DELETE FROM auth WHERE k = ?`, row(k));
+    tally?.add(`key:${keyType(k)}`, c.rowsWritten);
+  };
 
   const creds: AuthenticationCreds = read('creds') ?? initAuthCreds();
 

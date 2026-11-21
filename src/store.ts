@@ -9,6 +9,7 @@
  */
 import { getContentType, normalizeMessageContent, jidNormalizedUser } from '@whiskeysockets/baileys';
 import type { proto } from '@whiskeysockets/baileys';
+import type { WriteTally } from './write-tally.js';
 import type { Vault } from './vault.js';
 import { SearchIndex, fold, needsOf, words } from './search-index.js';
 
@@ -321,7 +322,7 @@ export class Store {
 
   private index: SearchIndex;
 
-  constructor(private sql: SqlStorage, private tx: <T>(fn: () => T) => T, private vault: Vault) {
+  constructor(private sql: SqlStorage, private tx: <T>(fn: () => T) => T, private vault: Vault, private tally?: WriteTally) {
     this.index = new SearchIndex(sql, vault, (data) => vault.open<MsgBlob>(data, MSG).b);
   }
 
@@ -398,6 +399,7 @@ export class Store {
     lid = jidNormalizedUser(lid);
     pn = jidNormalizedUser(pn);
     const L = this.pj(lid), P = this.pj(pn);
+    this.tally?.add(this.aliases().get(lid) === pn ? 'same:alias' : 'new:alias', 1);
     this.sql.exec(`INSERT OR REPLACE INTO alias (cid, data) VALUES (?, ?)`, L, this.vault.seal({ lid, pn }, ALIAS));
     this.aliases().set(lid, pn);
     // fold anything already stored under the lid into the phone-number jid
@@ -573,6 +575,7 @@ export class Store {
         const name = isPlaceholder(c.name) ? null : c.name;
         const notify = isPlaceholder(c.notify ?? c.verifiedName) ? null : (c.notify ?? c.verifiedName);
         const rec: ContactRec = { jid, name: name ?? prev?.name ?? null, notify: notify ?? prev?.notify ?? null };
+        this.tally?.add(prev && prev.name === rec.name && prev.notify === rec.notify ? 'same:contacts' : 'new:contacts', 1);
         this.sql.exec(`INSERT OR REPLACE INTO contacts (cid, data) VALUES (?, ?)`, cid, this.vault.seal(rec, CONTACT));
       }
     });
@@ -586,6 +589,7 @@ export class Store {
         if (!c.id || !name || isPlaceholder(name)) continue;
         const jid = this.norm(c.id) ?? c.id;
         const rec = this.getChat(jid) ?? { jid, group: jid.endsWith('@g.us') ? 1 : 0 } as ChatRec;
+        this.tally?.add(rec.name === name ? 'same:chats' : 'new:chats', 1);
         rec.name = name;
         this.putChat(rec);
       }
