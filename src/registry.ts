@@ -18,21 +18,39 @@ export class Registry extends DurableObject {
     return this.ctx.storage.sql.exec<{ n: number }>(`SELECT n FROM seats WHERE k = 'taken'`).toArray()[0]?.n ?? 0;
   }
 
+  /**
+   * Every account ever made, deleted ones included. Counting started 2026-11-21; it began at the seats taken then
+   * plus the deletions recorded in `days` (from 2026-11-10), so it misses the few deletions before that.
+   */
+  signups(): number {
+    const sql = this.ctx.storage.sql;
+    const row = sql.exec<{ n: number }>(`SELECT n FROM seats WHERE k = 'signups'`).toArray()[0];
+    if (row) return row.n;
+    const left = sql.exec<{ n: number }>(`SELECT COALESCE(SUM(left), 0) AS n FROM days`).toArray()[0].n;
+    const n = this.count() + left;
+    sql.exec(`INSERT INTO seats (k, n) VALUES ('signups', ?)`, n);
+    return n;
+  }
+
   /** Take a seat. `limit` 0 means no cap, but the seat is still counted. */
-  claim(limit: number): { ok: boolean; count: number } {
+  claim(limit: number): { ok: boolean; count: number; signups: number } {
     const n = this.count();
-    if (limit > 0 && n >= limit) return { ok: false, count: n };
+    if (limit > 0 && n >= limit) return { ok: false, count: n, signups: this.signups() };
+    const signups = this.signups() + 1;
     this.ctx.storage.sql.exec(`INSERT OR REPLACE INTO seats (k, n) VALUES ('taken', ?)`, n + 1);
+    this.ctx.storage.sql.exec(`INSERT OR REPLACE INTO seats (k, n) VALUES ('signups', ?)`, signups);
     this.tally('joined', 1);
-    return { ok: true, count: n + 1 };
+    return { ok: true, count: n + 1, signups };
   }
 
   /** Give a seat back. `undo` is a claim that didn't end in an account, so it shouldn't count as a signup or a leave. */
   release(undo = false): number {
     const n = Math.max(0, this.count() - 1);
     this.ctx.storage.sql.exec(`INSERT OR REPLACE INTO seats (k, n) VALUES ('taken', ?)`, n);
-    if (undo) this.tally('joined', -1);
-    else this.tally('left', 1);
+    if (undo) {
+      this.tally('joined', -1);
+      this.ctx.storage.sql.exec(`INSERT OR REPLACE INTO seats (k, n) VALUES ('signups', ?)`, Math.max(0, this.signups() - 1));
+    } else this.tally('left', 1);
     return n;
   }
 

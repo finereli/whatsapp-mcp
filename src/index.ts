@@ -103,8 +103,9 @@ async function proceed(env: Env, pendingId: string, who: Identity): Promise<Resp
   return remember(html(pairPage(pageToken, pending.oauth ? b64(pending.oauth) : null)));
 }
 
-/** Tell the operator when signups get close to the cap, and when they hit it. */
-async function milestone(env: Env, taken: number, limit: number) {
+/** Tell the operator about every hundredth signup, when signups get close to the cap, and when they hit it. */
+async function milestone(env: Env, taken: number, limit: number, signups: number) {
+  if (signups > 0 && signups % 100 === 0) await notify(env, `whatsapp-mcp: ${signups} signups`, `${signups} accounts have been made so far, ${taken} of them still here${limit ? `, out of ${limit} seats` : ''}.`);
   if (!limit) return;
   if (taken === limit) await notify(env, 'whatsapp-mcp is full', `All ${limit} seats are taken. New people now see the waitlist instead of a signup, until someone leaves or you raise SIGNUP_LIMIT.`);
   else if (limit >= 5 && taken === Math.ceil(limit * 0.8)) await notify(env, 'whatsapp-mcp is filling up', `${taken} of ${limit} seats are taken.`);
@@ -178,7 +179,7 @@ const ownerHandler = {
         noteSeats(signupLimit);
         return html(fullPage(signupLimit, contact, person.email), 503);
       }
-      if (r.seats) { noteSeats(r.seats.taken); await milestone(env, r.seats.taken, r.seats.limit); }
+      if (r.seats) { noteSeats(r.seats.taken); await milestone(env, r.seats.taken, r.seats.limit, r.seats.signups); }
       return proceed(env, p, r.who);
     }
 
@@ -235,7 +236,7 @@ const ownerHandler = {
     if (path === '/debug') {
       if (!pinOk(request, env)) return new Response('unauthorized', { status: 401 });
       const registry = seatRegistry(env);
-      if (url.searchParams.get('u') === 'seats') return json({ taken: await registry.count(), limit: signupLimit, waiting: await registry.waiting() });
+      if (url.searchParams.get('u') === 'seats') return json({ taken: await registry.count(), limit: signupLimit, waiting: await registry.waiting(), signups: await registry.signups() });
       if (url.searchParams.get('u') === 'signups') return json(await registry.days());
       if (url.searchParams.get('u') === 'waitlist') {
         const email = url.searchParams.get('remove');
@@ -271,6 +272,6 @@ export default {
     const registry = seatRegistry(env);
     const day = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
     const yesterday = (await registry.days(3)).find((d) => d.day === day) ?? { day, joined: 0, left: 0 };
-    console.log(JSON.stringify({ stats: { taken: await registry.count(), limit: signupLimitOf(env), waiting: await registry.waiting(), yesterday } }));
+    console.log(JSON.stringify({ stats: { taken: await registry.count(), limit: signupLimitOf(env), waiting: await registry.waiting(), signups: await registry.signups(), yesterday } }));
   },
 };

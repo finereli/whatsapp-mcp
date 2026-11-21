@@ -103,7 +103,7 @@ export async function takePending(env: AuthEnv, id: string) {
 
 // ---------- the single user's password ----------
 
-export type Attempt = { ok: true; who: Identity; seats?: { taken: number; limit: number } } | { ok: false; error: string; status: number; full?: boolean };
+export type Attempt = { ok: true; who: Identity; seats?: { taken: number; limit: number; signups: number } } | { ok: false; error: string; status: number; full?: boolean };
 const fail = (error: string, status = 401): Attempt => ({ ok: false, error, status });
 
 let decoy: AccountRecord | null = null;
@@ -172,7 +172,7 @@ export async function signInWithLogin(env: AuthEnv, who: { sub: string; key: str
     await registry.release(true); // lost a race with another first sign-in; it exists now
     return signInWithLogin(env, who, timezone);
   }
-  return { ok: true, who: { userId, dek: made.dek }, seats: { taken: seat.count, limit } };
+  return { ok: true, who: { userId, dek: made.dek }, seats: { taken: seat.count, limit, signups: seat.signups } };
 }
 
 // ---------- sessions: a token that carries the key ----------
