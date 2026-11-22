@@ -71,7 +71,8 @@ async function seatsFull(env: Env, limit: number): Promise<boolean> {
 const noteSeats = (taken: number) => { seatCache = { at: Date.now(), taken }; };
 
 function pinOk(request: Request, env: Env) {
-  const sent = request.headers.get('x-pin');
+  // x-debug-token is the same PIN under a name a credential proxy can inject (a cloud agent's environment)
+  const sent = request.headers.get('x-pin') ?? request.headers.get('x-debug-token');
   if (!sent || !env.PIN || env.PIN.length < 32 || sent.length !== env.PIN.length) return false;
   let diff = 0;
   for (let i = 0; i < sent.length; i++) diff |= sent.charCodeAt(i) ^ env.PIN.charCodeAt(i);

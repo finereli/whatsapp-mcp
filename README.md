@@ -345,7 +345,7 @@ These all cost real time to find. Read them before touching the Baileys parts.
 | `OPERATOR_NAME` | var, optional | Shown on the privacy page and terms as who runs this server. |
 | `TIMEZONE` | var, optional | IANA zone for timestamps in single-user mode. Otherwise each account uses the zone of the browser it signed up from. |
 | `DEFAULT_COUNTRY_CODE` | var, optional | Country code (digits, no plus), used when your agent saves a number written without one, e.g. `972`. |
-| `PIN` | secret, optional | 32+ random characters. Enables the `/debug` routes via an `x-pin` header. Leave it unset to leave them off. |
+| `PIN` | secret, optional | 32+ random characters. Enables the `/debug` routes via an `x-pin` header (or `x-debug-token`, for a proxy that injects credentials). Leave it unset to leave them off. |
 | `OAUTH_KV` | binding | Token store for the OAuth provider and pending sign-ins. |
 | `WA` | binding | The per-person Durable Object. |
 | `REGISTRY` | binding | One Durable Object that counts accounts, so `SIGNUP_LIMIT` is a real cap. |
