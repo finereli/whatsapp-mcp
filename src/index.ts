@@ -180,7 +180,12 @@ const ownerHandler = {
         noteSeats(signupLimit);
         return html(fullPage(signupLimit, contact, person.email), 503);
       }
-      if (r.seats) { noteSeats(r.seats.taken); await milestone(env, r.seats.taken, r.seats.limit, r.seats.signups); }
+      if (r.seats) {
+        noteSeats(r.seats.taken);
+        await milestone(env, r.seats.taken, r.seats.limit, r.seats.signups);
+        // someone who waited for a seat has one now; their email has done its job
+        if (person.email) await seatRegistry(env).unlist(person.email.trim().toLowerCase());
+      }
       return proceed(env, p, r.who);
     }
 
@@ -263,7 +268,16 @@ const oauth = new OAuthProvider({
 });
 
 export default {
-  fetch: (request: Request, env: Env, ctx: ExecutionContext) => oauth.fetch(request, env, ctx),
+  fetch: (request: Request, env: Env, ctx: ExecutionContext) => {
+    // Sign-in cookies are Secure, so a browser drops them over plain http and signing in loops. Send http to https,
+    // except on a local dev server.
+    const url = new URL(request.url);
+    if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
+      url.protocol = 'https:';
+      return Response.redirect(url.toString(), 301);
+    }
+    return oauth.fetch(request, env, ctx);
+  },
   /**
    * Once a day, write the seat and waitlist counts, and yesterday's signups and deletions, to the log, where the operator (or their agent, through
    * Cloudflare's API) can read them without the PIN. Counts only.
